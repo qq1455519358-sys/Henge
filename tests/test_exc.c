@@ -2,12 +2,17 @@
 
 #include <mach/mach_time.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/sysctl.h>
+
+#include "sysreg.h"
 
 DECLARE_PROGRAM(p_svc);
 DECLARE_PROGRAM(p_brk_undef);
 DECLARE_PROGRAM(p_dabt);
 DECLARE_PROGRAM(p_el0);
 DECLARE_PROGRAM(p_sysregs);
+DECLARE_PROGRAM(p_idregs);
 DECLARE_PROGRAM(p_irq);
 DECLARE_PROGRAM(p_fptrap);
 DECLARE_PROGRAM(p_psci);
@@ -32,6 +37,12 @@ static void check(const char *prog, const char *what, uint64_t got, uint64_t wan
         printf("  %s: %s = %llx, expected %llx\n", prog, what, (unsigned long long)got, (unsigned long long)want);
         failures++;
     }
+}
+
+static uint64_t host_runs(const char *feature) {
+    int on = 0;
+    size_t size = sizeof on;
+    return sysctlbyname(feature, &on, &size, NULL, 0) == 0 && on == 1;
 }
 
 static int run(const TestProgram *p, HvCpu *cpu, uint64_t x9) {
@@ -120,6 +131,34 @@ int main(void) {
         check("sysregs", "CNTV_CVAL", c.x[21], 0x123);
         check("sysregs", "CNTV_CTL ISTATUS", c.x[23], 5);
     }
+
+    /* The CPU the guest is told it has: hv_sysreg_configure, run by hv_vm_create before each start. */
+    static const TestProgram ids = TEST_PROGRAM(p_idregs);
+    const uint64_t baseline = 0x0000001110211011ull, offered = 0xfull << 44 | 0xfull << 52;
+    unsetenv("HV_MIDR");
+    unsetenv("HV_CPU_FEATURES");
+    hv_sysreg_configure();
+    if (!run(&ids, &c, 0)) {
+        check("idregs", "M1's MIDR by default", c.x[1], 0x611f0220);
+        check("idregs", "BF16 offered as the host runs it", (c.x[2] >> 44) & 0xf, host_runs("hw.optional.arm.FEAT_BF16"));
+        check("idregs", "I8MM offered as the host runs it", (c.x[2] >> 52) & 0xf, host_runs("hw.optional.arm.FEAT_I8MM"));
+        check("idregs", "the rest of ISAR1 is the baseline", c.x[2] & ~offered, baseline);
+    }
+    setenv("HV_MIDR", "m4", 1);
+    setenv("HV_CPU_FEATURES", "m1", 1);
+    hv_sysreg_configure();
+    if (!run(&ids, &c, 0)) {
+        check("idregs", "HV_MIDR=m4: M4's MIDR", c.x[1], 0x611f0520);
+        check("idregs", "HV_CPU_FEATURES=m1: the baseline exactly", c.x[2], baseline);
+    }
+    setenv("HV_MIDR", "0x411fd070", 1); /* an Arm Cortex-A57: not Apple's, so refused */
+    hv_sysreg_configure();
+    if (!run(&ids, &c, 0)) check("idregs", "a non-Apple HV_MIDR keeps M1's", c.x[1], 0x611f0220);
+    check("idregs", "the signature names the choice", !strcmp(hv_sysreg_signature(), "midr 0x611f0220"), 1);
+    unsetenv("HV_MIDR");
+    unsetenv("HV_CPU_FEATURES");
+    hv_sysreg_configure();
+
     mach_timebase_info_data_t tb;
     mach_timebase_info(&tb);
     check("host", "mach_absolute_time is 24 MHz (timebase 125/3)", (uint64_t)tb.numer * 1000 + tb.denom, 125003);

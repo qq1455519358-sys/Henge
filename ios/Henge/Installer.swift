@@ -108,7 +108,7 @@ final class Installer: NSObject, ObservableObject {
         grace = .invalid
     }
 
-    func start(_ release: MacOSRelease, name: String, ramMB: Int, cpus: Int, keepImage: Bool) {
+    func start(_ release: MacOSRelease, name: String, ramMB: Int, diskGB: Int = 64, cpus: Int, keepImage: Bool) {
         guard !busy else { return }
         phase = .checking
         machineName = name
@@ -125,7 +125,7 @@ final class Installer: NSObject, ObservableObject {
                 HengeLog.log("install", "boot ROM ready")
                 let ipsw = try await download(release)
                 phase = .preparing
-                var mac = try prepare(name: name, ramMB: ramMB, rom: rom)
+                var mac = try prepare(name: name, ramMB: ramMB, diskGB: diskGB, rom: rom)
                 mac.osName = release.name
                 made = mac
                 phase = .installing
@@ -193,10 +193,11 @@ final class Installer: NSObject, ObservableObject {
 
     // MARK: The new machine
 
-    private func prepare(name: String, ramMB: Int, rom: URL) throws -> VirtualMac {
+    private func prepare(name: String, ramMB: Int, diskGB: Int, rom: URL) throws -> VirtualMac {
         // A new machine identity, as VZMacMachineIdentifier makes one: a random ECID.
         let ecid = UInt64.random(in: 1 << 40 ..< 1 << 62)
-        var mac = VirtualMac(name: name, ecid: ecid, seed: 0, ramMB: ramMB, diskBytes: 64 << 30)
+        let diskBytes = Int64(diskGB) << 30
+        var mac = VirtualMac(name: name, ecid: ecid, seed: 0, ramMB: ramMB, diskBytes: diskBytes)
         (mac.screenWidth, mac.screenHeight) = Device.fittingScreen
         let fm = FileManager.default
         try fm.createDirectory(at: mac.directory, withIntermediateDirectories: true)
@@ -205,13 +206,13 @@ final class Installer: NSObject, ObservableObject {
         try fm.copyItem(at: rom, to: mac.rom)
         guard fm.createFile(atPath: mac.disk.path, contents: nil) else { throw message("Cannot create the disk.") }
         let h = try FileHandle(forWritingTo: mac.disk)
-        try h.truncate(atOffset: UInt64(64) << 30) // sparse: blocks are only used as macOS writes them
+        try h.truncate(atOffset: UInt64(diskBytes)) // sparse: blocks are only used as macOS writes them
         try h.close()
         guard henge_make_aux(mac.aux.path) == 0 else { throw message("Cannot create the auxiliary storage.") }
         let info: [String: Any] = ["name": name, "ecid": ecid, "seed": 0, "ramMB": ramMB]
         try JSONSerialization.data(withJSONObject: info).write(to: mac.directory.appendingPathComponent("machine.json"))
-        mac.diskBytes = 64 << 30
-        HengeLog.log("install", "new machine \(name): ECID \(ecid), 64 GB disk")
+        mac.diskBytes = diskBytes
+        HengeLog.log("install", "new machine \(name): ECID \(ecid), \(diskGB) GB disk")
         return mac
     }
 

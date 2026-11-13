@@ -17,6 +17,7 @@
 #include "net_slirp.h"
 #include "dns_proxy.h"
 #include "vm.h"
+#include "sysreg.h"
 #include "install.h"
 #include "snapshot.h"
 
@@ -486,4 +487,8 @@ uint64_t henge_largest_mapping_mb(void) {
         }
     }
     return 0;
+}
+
+const char *henge_cpu_signature(void) {
+    return hv_sysreg_signature();
 }

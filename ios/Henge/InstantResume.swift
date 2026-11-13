@@ -23,7 +23,9 @@ enum InstantResume {
         let commit = info["HengeBuildCommit"] as? String ?? "unstamped"
         let stamp = info["HengeBuildDate"] as? String ?? "?"
         return "Henge \(version) (\(build)) \(commit) \(stamp) mac \(mac.id.uuidString) ram \(ramMB) cpus \(cpus) "
-            + "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina)"
+            + "screen \(mac.screen.width)x\(mac.screen.height) retina \(mac.isRetina) "
+            // The CPU it was told it has: a Mac offered BF16/I8MM (or another MIDR) must not wake where they differ.
+            + "cpu \(String(cString: henge_cpu_signature()))"
     }
 
     /// A whole saved Mac for these settings, and when it was saved.

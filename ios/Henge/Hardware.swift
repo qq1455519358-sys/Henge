@@ -42,8 +42,34 @@ enum Device {
         return mb >= 14_000 ? 8 : mb >= 10_000 ? 6 : mb >= 7_000 ? 4 : mb >= 5_000 ? 3 : 2
     }
 
+    /// How many CPUs to suggest for a Mac: this chip's performance cores (hw.perflevel0), where iOS keeps the Mac's
+    /// CPU threads at Henge's QoS. Past them, some land on efficiency cores and hold up the rest each time the guest's
+    /// CPUs wait for one another. An M4 iPad Pro has 4 (1-2 TB) or 3 (256-512 GB); 4 where iOS doesn't say.
+    static let suggestedCPUs: Int = {
+        var cores: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname("hw.perflevel0.physicalcpu", &cores, &size, nil, 0) == 0, cores > 0 else { return 4 }
+        return min(max(Int(cores), 2), 6)
+    }()
+
     /// The choices for a Mac's memory, in GB.
     static let memoryChoices = 1...16
+
+    /// The sizes a new Mac's disk can have, in GB. The disk is a sparse file: this device's storage goes only to what
+    /// macOS writes, so a big disk costs nothing until it fills. 64 GB was the only size before.
+    static let diskChoices = [64, 128, 256, 512]
+
+    /// What a disk size means on this device. macOS sees all of the disk, so one larger than the free space here
+    /// would let macOS write past what this device can hold, and those writes would fail.
+    static func diskNote(_ gb: Int) -> String {
+        let free = (try? URL(fileURLWithPath: NSHomeDirectory()).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage ?? 0
+        let freeGB = Int(free >> 30)
+        if free > 0 && gb + 20 > freeGB {
+            return "This \(name) has \(freeGB) GB free: macOS could write past that, and those writes would fail."
+        }
+        return "Uses this \(name)'s storage only as macOS writes to it."
+    }
 
     /// What a choice risks on this device, if anything. An install always gets at least 2 GB (Installer.install).
     static func memoryNote(_ gb: Int) -> String? {

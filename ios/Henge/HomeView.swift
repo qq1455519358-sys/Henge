@@ -160,7 +160,7 @@ private struct MacHero: View {
     let start: () -> Void
     let turnOnJIT: () -> Void
     let jitNote: String?
-    @AppStorage("henge.cpus") private var cpus = 4
+    @AppStorage("henge.cpus") private var cpus = Device.suggestedCPUs
 
     var body: some View {
         VStack(spacing: 0) {

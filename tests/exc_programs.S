@@ -166,6 +166,13 @@ PROGRAM p_sysregs
     mrs x23, cntv_ctl_el0      // enabled and already expired: ISTATUS set
 END p_sysregs
 
+// The CPU the guest is told it has (core/sysreg.c, hv_sysreg_configure), read as macOS reads it.
+PROGRAM p_idregs
+    SETUP
+    mrs x1, midr_el1
+    mrs x2, id_aa64isar1_el1
+END p_idregs
+
 // The test raises the IRQ line before running; it is masked until DAIFClr.
 PROGRAM p_irq
     SETUP

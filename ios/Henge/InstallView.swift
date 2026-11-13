@@ -9,13 +9,14 @@ struct InstallView: View {
     @State private var release = MacOSRelease.all.first(where: Installer.haveImage) ?? MacOSRelease.recommended
     @State private var name = "Mac"
     @State private var ramGB = Device.suggestedRAMGB
+    @State private var diskGB = Device.diskChoices[0]
     @State private var deleteAfter = false
     @State private var refresh = 0 // redraws the list when a download is deleted
     @State private var details = false
     @State private var stageStarted = Date()
     @State private var stageSeen = -1
     @State private var confirmDeleteDownload: MacOSRelease?
-    @AppStorage("henge.cpus") private var cpus = 4
+    @AppStorage("henge.cpus") private var cpus = Device.suggestedCPUs
 
     var body: some View {
         NavigationStack {
@@ -111,6 +112,26 @@ struct InstallView: View {
                     .padding(.bottom, 10)
             }
             Rectangle().fill(Desk.hairline).frame(height: 0.5)
+            Stepper {
+                HStack {
+                    Text("Disk").font(.system(size: 16))
+                    Spacer()
+                    Text("\(diskGB) GB").font(.system(size: 16, weight: .semibold))
+                }
+            } onIncrement: {
+                if let next = Device.diskChoices.first(where: { $0 > diskGB }) { diskGB = next }
+            } onDecrement: {
+                if let previous = Device.diskChoices.last(where: { $0 < diskGB }) { diskGB = previous }
+            }
+            .padding(.horizontal, 17)
+            .padding(.vertical, 10)
+            Text(Device.diskNote(diskGB))
+                .font(.system(size: 13))
+                .foregroundStyle(Desk.dim)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 17)
+                .padding(.bottom, 10)
+            Rectangle().fill(Desk.hairline).frame(height: 0.5)
             Toggle("Delete the download after", isOn: $deleteAfter)
                 .font(.system(size: 16))
                 .padding(.horizontal, 17)
@@ -119,7 +140,7 @@ struct InstallView: View {
         .deskCard()
 
         Button(Installer.haveImage(release) ? "Install" : "Download and Install") {
-            installer.start(release, name: name.isEmpty ? "Mac" : name, ramMB: ramGB * 1024, cpus: cpus, keepImage: !deleteAfter)
+            installer.start(release, name: name.isEmpty ? "Mac" : name, ramMB: ramGB * 1024, diskGB: diskGB, cpus: cpus, keepImage: !deleteAfter)
         }
         .buttonStyle(DeskButtonStyle(enabled: jitReady && !Device.chipTooOld))
         .disabled(!jitReady || Device.chipTooOld)

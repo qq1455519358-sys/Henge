@@ -249,6 +249,7 @@ int hv_vm_create(const HvVmConfig *c, char *err, size_t errlen) {
         primary_started = 0;
     }
     if (!c->rom || !c->disk || !c->aux) return fail(err, errlen, "The ROM, disk and auxiliary storage are all needed.");
+    hv_sysreg_configure(); /* the CPU macOS is told it has, for this start (HV_MIDR, HV_CPU_FEATURES, the host chip) */
     machine_created = 1;
     struct sigaction ill = {.sa_flags = SA_SIGINFO | SA_ONSTACK};
     ill.sa_sigaction = on_ill;

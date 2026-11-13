@@ -37,6 +37,10 @@ int henge_vm_continue(void);
 int henge_vm_resume(const char *rom, const char *disk, const char *aux, uint64_t ecid, uint64_t seed, uint64_t ram_mb,
                     int cpus, const char *path, const char *ident, char *err, size_t errlen);
 int henge_vm_saved_ok(const char *path, const char *ident, uint64_t *bytes, int64_t *saved_at);
+/* The CPU a Mac started now is told it has (../core/sysreg.h): M1's identity and features, plus the BF16 and
+   I8MM this chip runs, with HV_MIDR and HV_CPU_FEATURES as set now, e.g. "midr 0x611f0220 bf16 i8mm". A saved Mac
+   is for that CPU too: macOS may have started using an instruction it was offered. */
+const char *henge_cpu_signature(void);
 
 /* 0 not started, 1 running, 2 stopped, 3 starting/stopping, 4 paused (saved, or being saved).
    Normal guests are fully released before state 2; installer sessions retain

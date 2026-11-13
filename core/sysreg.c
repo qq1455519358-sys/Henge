@@ -3,6 +3,7 @@
 #include <mach/mach_time.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/sysctl.h>
 
 #include "exception.h"
 #include "machine.h"
@@ -21,10 +22,69 @@
 #define ID_AA64MMFR0 0x0000000000100025ull /* 48-bit PA, 16-bit ASID, 4K/16K/64K granules */
 #define ID_AA64MMFR1 0x0000000000111000ull /* HPDS, LOR, PAN */
 #define ID_AA64DFR0  0x0000000000000006ull /* Armv8 debug, no PMU */
-#define MIDR         0x611f0220ull         /* Apple; a configuration constant for now */
+#define MIDR         0x611f0220ull         /* Apple M1 (T8103 "Tonga"), its efficiency-core part 0x022 */
+#define MIDR_M4      0x611f0520ull         /* Apple M4 (T8132 "Donan"), the same core type, part 0x052 (XNU proc_reg.h) */
 #define CTR_EL0      0x9444c004ull         /* 64-byte lines, PIPT I-cache, IDC */
 #define CLIDR        0x0a200023ull         /* L1 split, L2 unified */
 #define CNTFRQ       24000000ull
+
+/* ID_AA64ISAR1 fields beyond the baseline that a host may run natively. Both are plain SIMD/FP data
+   processing (no memory, no system state), so the translator copies them as it copies any vector
+   instruction; they only need the host chip to have them. A15/M2 and later do, A14/M1 do not. */
+#define ISAR1_BF16   (1ull << 44)          /* FEAT_BF16: BFDOT, BFMMLA, BFMLALB/T, BFCVT, BFCVTN */
+#define ISAR1_I8MM   (1ull << 52)          /* FEAT_I8MM: SMMLA, UMMLA, USMMLA, USDOT, SUDOT */
+
+/* The CPU the guest is told it has: the baseline above until hv_sysreg_configure() runs (tests use the
+   baseline), then what it picks for each machine start. Written before any of the guest's CPUs run. */
+static uint64_t guest_midr = MIDR;
+static uint64_t guest_isar1 = ID_AA64ISAR1;
+
+static int host_has(const char *feature) {
+    int on = 0;
+    size_t size = sizeof on;
+    return sysctlbyname(feature, &on, &size, NULL, 0) == 0 && on == 1;
+}
+
+/* HV_CPU_FEATURES=m1: the baseline only, for a machine that must also start on an A14/M1 device.
+   Otherwise the host's own BF16 and I8MM are added, so an M4 iPad's Mac gets them.
+   HV_MIDR=m4 (or an Apple MIDR value, 0x61...) changes the identity macOS reports (experimental:
+   macOS may choose code for that chip by its name alone). Anything else keeps M1's, and returns 1. */
+static int pick_cpu(uint64_t *midr, uint64_t *isar1) {
+    const char *features = getenv("HV_CPU_FEATURES");
+    *isar1 = ID_AA64ISAR1;
+    if (!(features && !strcmp(features, "m1"))) {
+        if (host_has("hw.optional.arm.FEAT_BF16")) *isar1 |= ISAR1_BF16;
+        if (host_has("hw.optional.arm.FEAT_I8MM")) *isar1 |= ISAR1_I8MM;
+    }
+    const char *id = getenv("HV_MIDR");
+    *midr = MIDR;
+    if (!id || !*id) return 0;
+    if (!strcmp(id, "m4")) {
+        *midr = MIDR_M4;
+        return 0;
+    }
+    char *end = NULL;
+    unsigned long long v = strtoull(id, &end, 0);
+    if (!end || *end || v >> 24 != 0x61 || v > 0xffffffffull) return 1;
+    *midr = v;
+    return 0;
+}
+
+void hv_sysreg_configure(void) {
+    if (pick_cpu(&guest_midr, &guest_isar1))
+        fprintf(stderr, "hengevm: HV_MIDR=%s is neither m4 nor an Apple MIDR (0x61......): keeping M1's\n",
+                getenv("HV_MIDR"));
+    fprintf(stderr, "hengevm: cpu %s\n", hv_sysreg_signature());
+}
+
+const char *hv_sysreg_signature(void) {
+    static char text[64];
+    uint64_t midr, isar1;
+    pick_cpu(&midr, &isar1);
+    snprintf(text, sizeof text, "midr %#llx%s%s", (unsigned long long)midr, isar1 & ISAR1_BF16 ? " bf16" : "",
+             isar1 & ISAR1_I8MM ? " i8mm" : "");
+    return text;
+}
 
 static uint64_t counter(void) {
     return mach_absolute_time(); /* 24 MHz on Apple silicon */
@@ -113,13 +173,13 @@ static int read_reg(HvCpu *cpu, uint32_t reg, uint64_t *v) {
     case R(3, 2, 0, 0, 0): *v = cpu->csselr_el1; return 0;
 
     /* Identification */
-    case R(3, 0, 0, 0, 0): *v = MIDR; return 0;
+    case R(3, 0, 0, 0, 0): *v = guest_midr; return 0;
     case R(3, 0, 0, 0, 5): *v = cpu->mpidr; return 0;
     case R(3, 0, 0, 0, 6): *v = 0; return 0;                             /* REVIDR */
     case R(3, 0, 0, 4, 0): *v = ID_AA64PFR0; return 0;
     case R(3, 0, 0, 5, 0): *v = ID_AA64DFR0; return 0;
     case R(3, 0, 0, 6, 0): *v = ID_AA64ISAR0; return 0;
-    case R(3, 0, 0, 6, 1): *v = ID_AA64ISAR1; return 0;
+    case R(3, 0, 0, 6, 1): *v = guest_isar1; return 0;
     case R(3, 0, 0, 7, 0): *v = ID_AA64MMFR0; return 0;
     case R(3, 0, 0, 7, 1): *v = ID_AA64MMFR1; return 0;
     case R(3, 3, 0, 0, 1): *v = CTR_EL0; return 0;
