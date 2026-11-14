@@ -9,7 +9,8 @@ struct InstallView: View {
     @State private var release = MacOSRelease.all.first(where: Installer.haveImage) ?? MacOSRelease.recommended
     @State private var name = "Mac"
     @State private var ramGB = Device.suggestedRAMGB
-    @State private var diskGB = Device.diskChoices[0]
+    @State private var diskIndex = 0 // into Device.diskChoices
+    private var diskGB: Int { Device.diskChoices[diskIndex] }
     @State private var deleteAfter = false
     @State private var refresh = 0 // redraws the list when a download is deleted
     @State private var details = false
@@ -112,16 +113,12 @@ struct InstallView: View {
                     .padding(.bottom, 10)
             }
             Rectangle().fill(Desk.hairline).frame(height: 0.5)
-            Stepper {
+            Stepper(value: $diskIndex, in: 0...(Device.diskChoices.count - 1)) {
                 HStack {
                     Text("Disk").font(.system(size: 16))
                     Spacer()
                     Text("\(diskGB) GB").font(.system(size: 16, weight: .semibold))
                 }
-            } onIncrement: {
-                if let next = Device.diskChoices.first(where: { $0 > diskGB }) { diskGB = next }
-            } onDecrement: {
-                if let previous = Device.diskChoices.last(where: { $0 < diskGB }) { diskGB = previous }
             }
             .padding(.horizontal, 17)
             .padding(.vertical, 10)
