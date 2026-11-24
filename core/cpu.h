@@ -33,7 +33,12 @@ static inline uint64_t hv_exec_key(uint64_t page_va, int64_t addend) {
 #define HV_TLB_PAGE_BITS 14
 #define HV_TLB_ADJ 15
 #define HV_TLB_INVALID 0x8080808080808080ull /* what memset(0x80) leaves */
-#define HV_TLB_BITS 14 /* 16384 entries per EL: 256 MB of 16 KB pages (xnu's working set overflowed 64 MB) */
+/* 16384 entries per EL: 256 MB of 16 KB pages (xnu's working set overflowed 64 MB). A build can pick another size
+   (-DHV_TLB_BITS=12) to weigh the table's cache footprint against more refills: each table is 32 << bits bytes. */
+#ifndef HV_TLB_BITS
+#define HV_TLB_BITS 14
+#endif
+_Static_assert(HV_TLB_BITS >= 7 && HV_TLB_BITS <= 14, "a table's offset is added as a multiple of 4 KB (put_tlb_slot), and the HvCpu has room for 14 bits");
 #define HV_TLB_SIZE (1u << HV_TLB_BITS)
 #define HV_IJC_TABLES 16
 #define HV_RET_BITS 13 /* entries in a return table */
@@ -98,7 +103,7 @@ typedef struct HvCpu {
        Bits 63..48, as ijc_salt; a new value empties that half of the tables. */
     uint64_t ret_salt[2] __attribute__((aligned(128)));
     uint64_t helper_came_from; /* 0x510: where hv_helper_entry was called from, to tell if it goes back there */
-    uint64_t inline_pad;     /* 0x518: leaves slot open for win_base (#157) before the 12 inline sysregs */
+    uint64_t win_base;       /* 0x518: HV_EL0_WINDOW: host address of guest user VA 0 (window.c), or 0 */
     /* 0x520..0x578: 12 inline-accessible sysregs fitting in the alignment gap before tlb (0x580). */
     uint64_t ttbr0_el1;      /* 0x520 */
     uint64_t ttbr1_el1;      /* 0x528 */
@@ -224,6 +229,7 @@ typedef struct HvCpu {
 #define HV_CPU_TCR_EL1     0x4e8
 #define HV_CPU_PAR_EL1     0x4f0
 #define HV_CPU_CNTVOFF     0x4f8
+#define HV_CPU_WIN_BASE    0x518
 #define HV_CPU_TTBR0_EL1   0x520
 #define HV_CPU_TTBR1_EL1   0x528
 #define HV_CPU_CONTEXTIDR_EL1 0x530
@@ -259,6 +265,7 @@ _Static_assert(offsetof(HvCpu, tlb) == HV_CPU_TLB, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, ret_salt) == HV_CPU_RET_SALT, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, tcr_el1) == HV_CPU_TCR_EL1, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, cntvoff) == HV_CPU_CNTVOFF, "HvCpu layout");
+_Static_assert(offsetof(HvCpu, win_base) == HV_CPU_WIN_BASE, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, ttbr0_el1) == HV_CPU_TTBR0_EL1, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, ttbr1_el1) == HV_CPU_TTBR1_EL1, "HvCpu layout");
 _Static_assert(offsetof(HvCpu, contextidr_el1) == HV_CPU_CONTEXTIDR_EL1, "HvCpu layout");
