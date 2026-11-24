@@ -350,8 +350,8 @@ static void trb(uint64_t pa, uint64_t address, uint32_t length, unsigned type, u
 }
 static void xhci_test(HvPcie *pci) {
     HvXhci *x = hv_xhci_create(&machine, pci);
-    CHECK(x && x->pci.bar_read(&x->pci, 0, 4, 4) >> 24 == 3);
-    CHECK((x->pci.bar_read(&x->pci, 0, 0x808, 4) >> 8 & 255) == 3);
+    CHECK(x && x->pci.bar_read(&x->pci, 0, 4, 4) >> 24 == HV_XHCI_PORTS); /* was a literal 3: stale since the mouse, tablet and dongle ports */
+    CHECK((x->pci.bar_read(&x->pci, 0, 0x808, 4) >> 8 & 255) == HV_XHCI_PORTS);
     CHECK((x->pci.bar_read(&x->pci, 0, 0x440, 4) >> 10 & 15) == 1);
     CHECK((x->pci.bar_read(&x->pci, 0, 0x460, 4) >> 10 & 15) == 3); /* high speed, not low speed (2) */
     x->slots[1].dev = 2;

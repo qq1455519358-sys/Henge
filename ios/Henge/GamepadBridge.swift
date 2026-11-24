@@ -1,21 +1,72 @@
 import Foundation
 import GameController
 
-/// Maps physical Bluetooth or USB-C game controllers (DualSense, Xbox, MFi) attached to the iPad
-/// into smooth 60 Hz Mac pointer/scroll input and standard keyboard controls.
+/// Physical Bluetooth or USB-C game controllers (DualSense, DualShock, Xbox, MFi) attached to the iPad, in one
+/// of two modes, chosen by UserDefaults "henge.gamepad.mode":
+///   "controller" (the default): the Mac sees a real USB game controller, a DualShock 4 on its xHCI's port 7
+///     (devices/xhci.c), so games, Steam, the browser's Gamepad API and macOS's GameController framework get its
+///     buttons and sticks. The controller is plugged into the Mac while one is attached here and pulled when it
+///     goes; its state goes over at 120 Hz while it changes, and once a second when it doesn't, so the report's
+///     counter keeps moving the way a real one's does.
+///   "pointer": the controller drives the Mac's pointer and keys (right stick the pointer, left stick WASD, ...).
 final class GamepadBridge: ObservableObject {
     static let shared = GamepadBridge()
     static let enabledKey = "henge.gamepad.enabled"
+    static let modeKey = "henge.gamepad.mode"
+
+    enum Mode: String {
+        case controller
+        case pointer
+    }
+
+    /// The DualShock 4's buttons, as henge_vm_gamepad_state takes them (HENGE_PAD_* in henge-vm.h).
+    enum PadButton {
+        static let square: UInt32 = 0x0001
+        static let cross: UInt32 = 0x0002
+        static let circle: UInt32 = 0x0004
+        static let triangle: UInt32 = 0x0008
+        static let l1: UInt32 = 0x0010
+        static let r1: UInt32 = 0x0020
+        static let l2: UInt32 = 0x0040
+        static let r2: UInt32 = 0x0080
+        static let share: UInt32 = 0x0100
+        static let options: UInt32 = 0x0200
+        static let l3: UInt32 = 0x0400
+        static let r3: UInt32 = 0x0800
+        static let ps: UInt32 = 0x1000
+        static let touchpad: UInt32 = 0x2000
+    }
+
+    /// One state of the Mac's controller: what henge_vm_gamepad_state is sent.
+    struct PadState: Equatable {
+        var buttons: UInt32 = 0
+        var hat: Int8 = 8 // 0 up, clockwise to 7 up-left; 8 none
+        var lx: UInt8 = 0x80, ly: UInt8 = 0x80, rx: UInt8 = 0x80, ry: UInt8 = 0x80 // 0x80 centred, 0x00 left and up
+        var l2: UInt8 = 0, r2: UInt8 = 0
+    }
 
     @Published private(set) var controllerName: String?
 
     private var timer: Timer?
+    private var timerMode: Mode?
     private var observers: [NSObjectProtocol] = []
+    // Pointer mode.
     private var heldUsages = Set<UInt8>()
     private var leftButtonDown = false
     private var rightButtonDown = false
     private var menuChordDown = false
     private var scrollTick = 0
+    // Controller mode.
+    private var pluggedIn = false
+    private var lastSent: PadState?
+    private var lastSentAt = Date.distantPast
+    // The autopilot's controller (Autopilot.swift "pad ..."): plugged in with no physical one, its presses
+    // added to whatever a physical one holds.
+    private var forced = false
+    private var virtualButtons: UInt32 = 0
+    private var virtualHat: Int8 = 8
+    private var virtualLeft: (UInt8, UInt8)?
+    private var virtualRight: (UInt8, UInt8)?
 
     var isEnabled: Bool {
         get { (UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool) ?? true }
@@ -23,6 +74,15 @@ final class GamepadBridge: ObservableObject {
             objectWillChange.send()
             UserDefaults.standard.set(newValue, forKey: Self.enabledKey)
             if !newValue { releaseAll() }
+            refreshControllers()
+        }
+    }
+
+    var mode: Mode {
+        get { Mode(rawValue: UserDefaults.standard.string(forKey: Self.modeKey) ?? "") ?? .controller }
+        set {
+            objectWillChange.send()
+            UserDefaults.standard.set(newValue.rawValue, forKey: Self.modeKey)
             refreshControllers()
         }
     }
@@ -43,27 +103,198 @@ final class GamepadBridge: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+        timerMode = nil
         for obs in observers { NotificationCenter.default.removeObserver(obs) }
         observers.removeAll()
         releaseAll()
+        forced = false
+        resetVirtual()
+        setPlugged(false)
         controllerName = nil
     }
 
     private func refreshControllers() {
         let active = GCController.controllers().first { $0.extendedGamepad != nil }
         controllerName = active.map { $0.vendorName ?? "Game Controller" }
-        if active != nil && isEnabled {
-            if timer == nil {
-                let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in self?.poll() }
-                RunLoop.main.add(t, forMode: .common)
-                timer = t
+        let physical = active != nil && isEnabled
+        // HV_NO_GAMEPAD (the engine's kill switch) leaves the Mac's port empty: the controller drives the pointer then.
+        let macController = mode == .controller && getenv("HV_NO_GAMEPAD") == nil
+        let plug = (physical && macController) || forced
+        setPlugged(plug)
+        let runMode: Mode? = plug ? .controller : (physical ? .pointer : nil)
+        if runMode != .pointer { releaseAll() } // nothing stays held from pointer mode
+        guard runMode != timerMode else { return }
+        timer?.invalidate()
+        timer = nil
+        timerMode = runMode
+        if let runMode {
+            let t = Timer(timeInterval: runMode == .controller ? 1.0 / 120.0 : 1.0 / 60.0, repeats: true) { [weak self] _ in
+                self?.tick()
             }
-        } else {
-            timer?.invalidate()
-            timer = nil
-            releaseAll()
+            RunLoop.main.add(t, forMode: .common)
+            timer = t
         }
     }
+
+    private func tick() {
+        switch timerMode {
+        case .controller?: sendState()
+        case .pointer?: poll()
+        case nil: break
+        }
+    }
+
+    // MARK: Controller mode
+
+    /// Plug the Mac's controller in or pull it. A pull first lets go of everything, so nothing stays held in a game.
+    private func setPlugged(_ on: Bool) {
+        guard on != pluggedIn else { return }
+        if !on {
+            let s = PadState()
+            henge_vm_gamepad_state(s.buttons, s.hat, s.lx, s.ly, s.rx, s.ry, s.l2, s.r2)
+        }
+        pluggedIn = on
+        lastSent = nil
+        henge_vm_gamepad_set_connected(on ? 1 : 0)
+        HengeLog.log("gamepad", on ? "controller plugged into the Mac" : "controller pulled from the Mac")
+    }
+
+    /// The state now, sent when it changed or a second has passed.
+    private func sendState(force: Bool = false) {
+        guard pluggedIn else { return }
+        let s = currentState()
+        let now = Date()
+        guard force || s != lastSent || now.timeIntervalSince(lastSentAt) >= 1.0 else { return }
+        henge_vm_gamepad_state(s.buttons, s.hat, s.lx, s.ly, s.rx, s.ry, s.l2, s.r2)
+        lastSent = s
+        lastSentAt = now
+    }
+
+    private func currentState() -> PadState {
+        var s = PadState()
+        if isEnabled, let pad = GCController.controllers().compactMap(\.extendedGamepad).first {
+            s = Self.state(of: pad)
+        }
+        s.buttons |= virtualButtons
+        if virtualHat != 8 { s.hat = virtualHat }
+        if let v = virtualLeft { s.lx = v.0; s.ly = v.1 }
+        if let v = virtualRight { s.rx = v.0; s.ry = v.1 }
+        if virtualButtons & PadButton.l2 != 0 { s.l2 = 255 }
+        if virtualButtons & PadButton.r2 != 0 { s.r2 = 255 }
+        return s
+    }
+
+    /// Buttons by position: the bottom face button (A) is the DualShock's cross, right (B) circle, left (X)
+    /// square, top (Y) triangle. Menu is Options, the Options/View/Share button Share, Home the PS button.
+    static func state(of pad: GCExtendedGamepad) -> PadState {
+        var s = PadState()
+        var b: UInt32 = 0
+        if pad.buttonA.isPressed { b |= PadButton.cross }
+        if pad.buttonB.isPressed { b |= PadButton.circle }
+        if pad.buttonX.isPressed { b |= PadButton.square }
+        if pad.buttonY.isPressed { b |= PadButton.triangle }
+        if pad.leftShoulder.isPressed { b |= PadButton.l1 }
+        if pad.rightShoulder.isPressed { b |= PadButton.r1 }
+        if pad.leftTrigger.isPressed { b |= PadButton.l2 }
+        if pad.rightTrigger.isPressed { b |= PadButton.r2 }
+        if pad.buttonMenu.isPressed { b |= PadButton.options }
+        if pad.buttonOptions?.isPressed == true { b |= PadButton.share }
+        if pad.buttonHome?.isPressed == true { b |= PadButton.ps }
+        if pad.leftThumbstickButton?.isPressed == true { b |= PadButton.l3 }
+        if pad.rightThumbstickButton?.isPressed == true { b |= PadButton.r3 }
+        if let ds4 = pad as? GCDualShockGamepad, ds4.touchpadButton.isPressed { b |= PadButton.touchpad }
+        if let ds5 = pad as? GCDualSenseGamepad, ds5.touchpadButton.isPressed { b |= PadButton.touchpad }
+        s.buttons = b
+        s.hat = hat(up: pad.dpad.up.isPressed, right: pad.dpad.right.isPressed,
+                    down: pad.dpad.down.isPressed, left: pad.dpad.left.isPressed)
+        s.lx = axis(pad.leftThumbstick.xAxis.value)
+        s.ly = axis(-pad.leftThumbstick.yAxis.value) // GameController: +1 up; the DualShock: 0x00 up
+        s.rx = axis(pad.rightThumbstick.xAxis.value)
+        s.ry = axis(-pad.rightThumbstick.yAxis.value)
+        s.l2 = trigger(pad.leftTrigger.value)
+        s.r2 = trigger(pad.rightTrigger.value)
+        return s
+    }
+
+    /// -1...1 to 0...255, 0 to 0x80.
+    static func axis(_ v: Float) -> UInt8 {
+        let c = Double(max(-1, min(1, v)))
+        return UInt8(max(0, min(255, ((c + 1) * 127.5).rounded())))
+    }
+
+    static func trigger(_ v: Float) -> UInt8 {
+        let c = Double(max(0, min(1, v)))
+        return UInt8(max(0, min(255, (c * 255).rounded())))
+    }
+
+    static func hat(up: Bool, right: Bool, down: Bool, left: Bool) -> Int8 {
+        switch (up, right, down, left) {
+        case (true, false, false, false): return 0
+        case (true, true, false, false): return 1
+        case (false, true, false, false): return 2
+        case (false, true, true, false): return 3
+        case (false, false, true, false): return 4
+        case (false, false, true, true): return 5
+        case (false, false, false, true): return 6
+        case (true, false, false, true): return 7
+        default: return 8
+        }
+    }
+
+    // MARK: The autopilot's controller
+
+    /// Plug the controller into the Mac (or pull it) with no physical one attached.
+    func autopilotConnect(_ on: Bool) {
+        forced = on
+        if !on { resetVirtual() }
+        refreshControllers()
+        sendState(force: true)
+    }
+
+    private func resetVirtual() {
+        virtualButtons = 0
+        virtualHat = 8
+        virtualLeft = nil
+        virtualRight = nil
+    }
+
+    /// Hold or let go of a button by name (cross, circle, square, triangle, l1, r1, l2, r2, l3, r3, share,
+    /// options, ps, touchpad, up, down, left, right). False for a name it doesn't know.
+    func autopilotButton(_ name: String, down: Bool) -> Bool {
+        let buttons: [String: UInt32] = [
+            "cross": PadButton.cross, "circle": PadButton.circle, "square": PadButton.square, "triangle": PadButton.triangle,
+            "l1": PadButton.l1, "r1": PadButton.r1, "l2": PadButton.l2, "r2": PadButton.r2, "l3": PadButton.l3,
+            "r3": PadButton.r3, "share": PadButton.share, "options": PadButton.options, "ps": PadButton.ps,
+            "touchpad": PadButton.touchpad,
+        ]
+        let hats: [String: Int8] = ["up": 0, "right": 2, "down": 4, "left": 6]
+        if let bit = buttons[name] {
+            if down { virtualButtons |= bit } else { virtualButtons &= ~bit }
+        } else if let h = hats[name] {
+            virtualHat = down ? h : 8
+        } else {
+            return false
+        }
+        sendState(force: true)
+        return true
+    }
+
+    /// Hold a stick ("left" or "right") at x, y in -1...1, +1 right and up; 0 0 centres it.
+    func autopilotStick(_ side: String, x: Double, y: Double) -> Bool {
+        let v = (Self.axis(Float(x)), Self.axis(Float(-y)))
+        switch side {
+        case "left": virtualLeft = v
+        case "right": virtualRight = v
+        default: return false
+        }
+        sendState(force: true)
+        return true
+    }
+
+    /// Whether the Mac has the controller and reads it.
+    var macReadsController: Bool { henge_vm_gamepad_ready() != 0 }
+
+    // MARK: Pointer mode
 
     private func setUsage(_ usage: UInt8, down: Bool) {
         if down {

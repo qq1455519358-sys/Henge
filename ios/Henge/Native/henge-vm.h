@@ -133,6 +133,30 @@ void henge_vm_microphone(const float *mono_48000, uint32_t frames);
 void henge_vm_camera_nv12(const uint8_t *y, uint32_t y_stride, const uint8_t *uv,
                           uint32_t uv_stride, uint32_t width, uint32_t height, int mirrored);
 
+/* A game controller held to the device, as the Mac's USB DualShock 4 (port 7 of its xHCI).
+   set_connected is a level, kept even with no Mac running: a Mac started later finds the
+   controller plugged in, a running one sees it plugged or pulled within a tick. ready is 1
+   once macOS reads the controller. state: buttons as HENGE_PAD_* bits; hat 0..7 from up,
+   clockwise, -1 (or 8) for none; sticks 0x80 centred, 0x00 left and up; triggers 0..255. */
+#define HENGE_PAD_SQUARE   0x0001u
+#define HENGE_PAD_CROSS    0x0002u
+#define HENGE_PAD_CIRCLE   0x0004u
+#define HENGE_PAD_TRIANGLE 0x0008u
+#define HENGE_PAD_L1       0x0010u
+#define HENGE_PAD_R1       0x0020u
+#define HENGE_PAD_L2       0x0040u
+#define HENGE_PAD_R2       0x0080u
+#define HENGE_PAD_SHARE    0x0100u
+#define HENGE_PAD_OPTIONS  0x0200u
+#define HENGE_PAD_L3       0x0400u
+#define HENGE_PAD_R3       0x0800u
+#define HENGE_PAD_PS       0x1000u
+#define HENGE_PAD_TOUCHPAD 0x2000u
+int henge_vm_gamepad_ready(void);
+void henge_vm_gamepad_set_connected(int connected);
+void henge_vm_gamepad_state(uint32_t buttons, int8_t hat, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry,
+                            uint8_t l2, uint8_t r2);
+
 /* Per-machine UUID (16 raw bytes) and live CoreBluetooth radio bridge for the USB Bluetooth HCI controller. */
 void henge_vm_set_machine_uuid(const uint8_t *uuid16);
 int henge_vm_bt_scan_active(void);

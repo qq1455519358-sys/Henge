@@ -19,6 +19,11 @@ import UIKit
 ///   cpus N             the CPUs setting (1-6) for the next Mac started; it stays, so set it back afterwards
 ///   env NAME [VALUE]   set (or unset) an engine environment setting for the next Mac started
 ///   balloon MB         ask the Mac for that much of its memory back (HV_BALLOON set), log what it gave
+///   pad connect, pad disconnect   plug the Mac's USB game controller (a DualShock 4) in or pull it, with no
+///                      controller held to the device
+///   pad press NAME [MS]  hold a button for MS milliseconds (150): cross, circle, square, triangle, l1, r1, l2, r2,
+///                      share, options, ps, up, down, left, right (also l3, r3, touchpad)
+///   pad stick left|right X Y  hold a stick at X, Y in -1...1 (+1 right and up); 0 0 centres it
 ///   snap [NAME]        the Mac's screen (1920x1080) into Documents/NAME.jpg (snap.jpg)
 ///   log TEXT           a marker in henge.log
 ///   stop               stop the Mac
@@ -139,6 +144,34 @@ enum Autopilot {
         case "balloon": // "balloon 2048": ask the Mac to hand 2 GB of its memory back (needs HV_BALLOON in henge-env.txt)
             let got = henge_vm_balloon(Int(arg) ?? -1)
             HengeLog.log("autopilot", got < 0 ? "no balloon (set HV_BALLOON in henge-env.txt)" : "balloon: the Mac has handed over \(got) MB")
+        case "pad": // the Mac's USB game controller, driven with nothing held to the device: "pad press cross 200"
+            let words = arg.split(separator: " ").map(String.init)
+            let pad = GamepadBridge.shared
+            switch words.first ?? "" {
+            case "connect":
+                pad.autopilotConnect(true)
+                HengeLog.log("autopilot", "pad: plugged in")
+            case "disconnect":
+                pad.autopilotConnect(false)
+                HengeLog.log("autopilot", "pad: pulled")
+            case "press":
+                guard words.count >= 2 else { HengeLog.log("autopilot", "pad press wants a button name"); return }
+                let name = words[1].lowercased()
+                let ms = words.count >= 3 ? max(1, Int(words[2]) ?? 150) : 150
+                guard pad.autopilotButton(name, down: true) else { HengeLog.log("autopilot", "pad: no button \(name)"); return }
+                try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
+                _ = pad.autopilotButton(name, down: false)
+                HengeLog.log("autopilot", "pad: \(name) held \(ms) ms, the Mac \(pad.macReadsController ? "reads" : "does not read") the controller")
+            case "stick":
+                guard words.count == 4, let sx = Double(words[2]), let sy = Double(words[3]),
+                      pad.autopilotStick(words[1].lowercased(), x: max(-1, min(1, sx)), y: max(-1, min(1, sy))) else {
+                    HengeLog.log("autopilot", "pad stick wants left|right X Y")
+                    return
+                }
+                HengeLog.log("autopilot", "pad: \(words[1]) stick at \(sx), \(sy)")
+            default:
+                HengeLog.log("autopilot", "pad wants connect, disconnect, press NAME [MS] or stick left|right X Y")
+            }
         case "tlsamples": // the sample Mac programs into Documents/Mac Apps (Mac apps without macOS)
             guard let dmg = Bundle.main.url(forResource: "tl-samples", withExtension: "dmg") else { HengeLog.log("autopilot", "no samples in this build"); break }
             try? FileManager.default.createDirectory(at: MacAppsStore.folder, withIntermediateDirectories: true)

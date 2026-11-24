@@ -590,6 +590,33 @@ void henge_vm_camera_nv12(const uint8_t *y, uint32_t ys, const uint8_t *uv,
     pthread_rwlock_unlock(&api_lock);
 }
 
+/* The controller's bits are the device's own (devices/xhci.h): the header only repeats them for Swift. */
+_Static_assert(HENGE_PAD_CROSS == HV_PAD_CROSS && HENGE_PAD_PS == HV_PAD_PS && HENGE_PAD_TOUCHPAD == HV_PAD_TOUCHPAD &&
+               HENGE_PAD_L1 == HV_PAD_L1 && HENGE_PAD_OPTIONS == HV_PAD_OPTIONS, "gamepad button bits");
+
+int henge_vm_gamepad_ready(void) {
+    if (!lock_running()) return 0;
+    HvVmapple *b = hv_vm_board();
+    int ready = b->usb ? hv_xhci_gamepad_ready(b->usb) : 0;
+    pthread_rwlock_unlock(&api_lock);
+    return ready;
+}
+
+void henge_vm_gamepad_set_connected(int connected) {
+    hv_xhci_gamepad_set_connected(connected); /* a level, whether or not a Mac runs now */
+    if (!lock_running()) return;
+    hv_machine_wake(hv_vm_machine()); /* the next poll plugs it in or pulls it */
+    pthread_rwlock_unlock(&api_lock);
+}
+
+void henge_vm_gamepad_state(uint32_t buttons, int8_t hat, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry,
+                            uint8_t l2, uint8_t r2) {
+    if (!lock_running()) return;
+    HvVmapple *b = hv_vm_board();
+    if (b->usb) hv_xhci_gamepad_state(b->usb, buttons, hat, lx, ly, rx, ry, l2, r2);
+    pthread_rwlock_unlock(&api_lock);
+}
+
 int henge_vm_bt_scan_active(void) {
     if (!lock_running()) return 0;
     HvVmapple *b = hv_vm_board();

@@ -14,7 +14,8 @@
      Port 3 (dev 2): UVC bulk Front/Back camera
      Port 4 (dev 3): 5-button wheel USB mouse
      Port 5 (dev 4): Absolute-position USB tablet / Apple Pencil digitizer
-     Port 6 (dev 5): Broadcom BCM20702A0 USB Bluetooth HCI controller */
+     Port 6 (dev 5): Broadcom BCM20702A0 USB Bluetooth HCI controller
+     Port 7 (dev 6): Sony DualShock 4 (v2) game controller, while one is held to the host */
 enum {
     HV_XDEV_KBD = 0,
     HV_XDEV_TP = 1,
@@ -22,10 +23,11 @@ enum {
     HV_XDEV_MOUSE = 3,
     HV_XDEV_TABLET = 4,
     HV_XDEV_BT = 5,
+    HV_XDEV_PAD = 6,
 };
 #define HV_XHCI_SLOTS 12
-#define HV_XHCI_PORTS 6
-#define HV_XHCI_DEVICES 5
+#define HV_XHCI_PORTS 7
+#define HV_XHCI_DEVICES 7 /* indexes devs[]; HV_XDEV_BT's entry stays empty (the dongle has its own paths) */
 #define HV_XHCI_INTRS 4
 #define HV_XHCI_EPS 32 /* device context index 1..31 */
 #define HV_XHCI_REPORTS 256
@@ -40,6 +42,33 @@ enum {
 /* The mouse's report: buttons 1-5, X and Y (16 bits each, relative), wheel, horizontal pan. */
 #define HV_MS_REPORT_LEN 7
 #define HV_MS_REPORTS 128
+/* The game controller's buttons, as hv_xhci_gamepad_state takes them: the DS4's own HID
+   button order (buttons 1-14), so bits 0-3, 4-11 and 12-13 drop straight into report bytes
+   5, 6 and 7. */
+#define HV_PAD_SQUARE   (1u << 0)
+#define HV_PAD_CROSS    (1u << 1)
+#define HV_PAD_CIRCLE   (1u << 2)
+#define HV_PAD_TRIANGLE (1u << 3)
+#define HV_PAD_L1       (1u << 4)
+#define HV_PAD_R1       (1u << 5)
+#define HV_PAD_L2       (1u << 6)
+#define HV_PAD_R2       (1u << 7)
+#define HV_PAD_SHARE    (1u << 8)
+#define HV_PAD_OPTIONS  (1u << 9)
+#define HV_PAD_L3       (1u << 10)
+#define HV_PAD_R3       (1u << 11)
+#define HV_PAD_PS       (1u << 12)
+#define HV_PAD_TOUCHPAD (1u << 13)
+#define HV_PAD_REPORT_LEN 64 /* USB input report 0x01 */
+#define HV_PAD_REPORTS 64
+
+/* One state of the controller: what a report is built from when the guest takes it. */
+typedef struct HvPadState {
+    uint32_t buttons;           /* HV_PAD_* */
+    uint8_t hat;                /* 0 up, clockwise to 7 up-left; 8 none */
+    uint8_t lx, ly, rx, ry;     /* 0x80 centred, 0x00 left/up */
+    uint8_t l2, r2;             /* trigger travel, 0..255 */
+} HvPadState;
 
 typedef struct HvXhciRing {
     uint64_t dequeue; /* guest PA of the next TRB */
@@ -68,6 +97,7 @@ typedef struct HvXhci {
     struct HvXhciSlot {
         int dev;         /* HV_XDEV_*, or -1 none */
         uint64_t camera_generation;
+        uint64_t pad_generation;     /* the controller's plug-in this slot was addressed for */
         int configured;
         HvXhciRing ep[HV_XHCI_EPS];
         int ep_running[HV_XHCI_EPS];
@@ -128,6 +158,22 @@ typedef struct HvXhci {
     int bt_configured;
     uint8_t bt_alt[4];
     HvBtHci bt;
+    /* The game controller (port 7). Whether one is held to the host is a process-wide
+       level (hv_xhci_gamepad_set_connected); pad_present is what the port shows the guest,
+       and only hv_xhci_poll (the CPU thread) moves it, the way the camera reconnects. */
+    int pad_disabled;            /* HV_NO_GAMEPAD: the port stays empty */
+    int pad_present;
+    uint64_t pad_generation;     /* one more at each unplug: slots addressed before it are stale */
+    uint64_t pad_replug_ns;      /* no plug-in again before this (host monotonic clock) */
+    /* Under mu: the latest state, and the states waiting for an IN transfer. Stick moves
+       merge into the newest waiting state; a button or hat change always gets one of its
+       own, so a quick tap is never lost between two reads of a busy guest. */
+    HvPadState pad_cur;
+    HvPadState pad_q[HV_PAD_REPORTS];
+    uint32_t pad_qhead, pad_qtail;
+    uint8_t pad_counter;         /* the report's 6-bit frame counter */
+    uint32_t pad_reqs;           /* control requests logged, capped */
+    uint64_t pad_delivered;
 } HvXhci;
 
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus);
@@ -164,6 +210,16 @@ int hv_xhci_bt_scan_active(HvXhci *x);
 int hv_xhci_bt_inject_adv(HvXhci *x, uint8_t addr_type, const uint8_t addr[6], int8_t rssi,
                           const uint8_t *adv_data, uint32_t adv_len);
 int hv_xhci_bt_adv_active(HvXhci *x, uint8_t *out, uint32_t cap, uint32_t *out_len);
+/* Any thread, even with no machine running: whether a game controller is held to the host.
+   The xHCI plugs its DualShock 4 into port 7 (or pulls it) at its next poll, and one created
+   later starts with the port in that state. HV_NO_GAMEPAD keeps the port empty regardless. */
+void hv_xhci_gamepad_set_connected(int connected);
+/* Any thread: the controller's state now. hat 0..7 (up, clockwise), anything else none;
+   sticks 0x80 centred with 0x00 left/up; triggers 0..255. */
+void hv_xhci_gamepad_state(HvXhci *x, uint32_t buttons, int hat, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry,
+                           uint8_t l2, uint8_t r2);
+/* Whether the guest has configured the controller and is reading it. */
+int hv_xhci_gamepad_ready(const HvXhci *x);
 /* CPU thread: hand waiting reports to the guest. */
 void hv_xhci_poll(HvXhci *x);
 /* CPU stopped: rebase host deadlines and discard pre-pause camera images. */

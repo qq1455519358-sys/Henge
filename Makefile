@@ -143,6 +143,10 @@ $(B)/test_bt_bridge: tests/test_bt_bridge.c $(B)/bt_hci.o
 BT_XHCI_TESTS = $(B)/test_bt_bdaddr $(B)/test_bt_hci21 $(B)/test_bt_hci_extfeat $(B)/test_bt_hci_initseq $(B)/test_bt_hci_postinit
 $(BT_XHCI_TESTS): $(B)/test_bt_%: tests/test_bt_%.c devices/xhci.c devices/*.h $(ENGINE) $(filter-out $(B)/xhci.o,$(DEV))
 	$(CC) $(CFLAGS) $< $(ENGINE) $(filter-out $(B)/xhci.o,$(DEV)) $(METAL_LIBS) -o $@
+# The USB game controller (port 7 of the xHCI): the test includes devices/xhci.c itself and stubs the engine
+# calls it makes, so it links only the two device files that need nothing from the engine.
+$(B)/test_gamepad: tests/test_gamepad.c devices/xhci.c devices/bt_hci.c devices/usb_camera.c devices/*.h core/*.h | $(B)
+	$(CC) $(CFLAGS) tests/test_gamepad.c devices/bt_hci.c devices/usb_camera.c -o $@
 # The device-tree plant (host/dtplant.h, header only), on the synthetic ADT in tests/fixtures.
 $(B)/test_dtplant: tests/test_dtplant.c host/dtplant.h | $(B)
 	$(CC) $(CFLAGS) tests/test_dtplant.c -o $@
@@ -154,7 +158,7 @@ $(B)/test_dtplant: tests/test_dtplant.c host/dtplant.h | $(B)
 #   test_pvg_lifecycle  creates a ParavirtualizedGraphics device, which a hosted runner (itself a VM) is not known to offer
 #   test_bench  a timing run, by hand (tests/bench_programs.S says so)
 #   the Swift tests and tests/test_jit_high_room.py  their own targets and tools
-UNIT_TESTS = $(TESTS) $(B)/test_bt $(B)/test_bt_bridge $(BT_XHCI_TESTS) $(B)/test_dns_lifecycle
+UNIT_TESTS = $(TESTS) $(B)/test_bt $(B)/test_bt_bridge $(BT_XHCI_TESTS) $(B)/test_dns_lifecycle $(B)/test_gamepad
 test-units: $(UNIT_TESTS) $(B)/test_dtplant
 	@ulimit -s 65520; for t in $(UNIT_TESTS); do echo "== $$t"; $$t || exit 1; done; \
 	  echo "== $(B)/test_dtplant"; $(B)/test_dtplant tests/fixtures/adt-synthetic.bin

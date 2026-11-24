@@ -1,5 +1,6 @@
 #include "xhci.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -193,12 +194,83 @@ static const uint8_t tab_config_desc[34] = {
 
 static const char *const tab_strings[] = {NULL, "HengeVM", "HengeVM USB Tablet", "1"};
 
+/* Port 7: a Sony DualShock 4 v2 (vendor 0x054C, product 0x09CC), which macOS drives over USB
+   with its own HID driver, so games, the GameController framework and the browser's Gamepad
+   API all see a controller. The report descriptor is a real DS4's USB one, byte for byte as
+   hid-tools' PS4ControllerUSB carries it (507 bytes; registered there under the first model's
+   0x05C4, and not diffed here against a 0x09CC capture). Input report 0x01 is 64 bytes: four sticks (X, Y, Z, Rz), a 4-bit hat,
+   14 buttons and a 6-bit counter, the triggers (Rx, Ry), then 54 vendor bytes holding the
+   timestamp, motion sensors, battery and touch pad. Output 0x05 is rumble and the light bar;
+   the rest are vendor feature reports, of which drivers read 0x02 (motion calibration), 0x12
+   (pairing: the controller's MAC) and 0xA3 (firmware date and versions). */
+static const uint8_t pad_report_desc[] = {
+    /* Report 0x01, the input: X Y Z Rz; hat; buttons 1-14; counter; Rx Ry; 54 vendor bytes. */
+    0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x32, 0x09, 0x35,
+    0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x04, 0x81, 0x02, 0x09, 0x39, 0x15, 0x00, 0x25,
+    0x07, 0x35, 0x00, 0x46, 0x3b, 0x01, 0x65, 0x14, 0x75, 0x04, 0x95, 0x01, 0x81, 0x42, 0x65, 0x00,
+    0x05, 0x09, 0x19, 0x01, 0x29, 0x0e, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x0e, 0x81, 0x02,
+    0x06, 0x00, 0xff, 0x09, 0x20, 0x75, 0x06, 0x95, 0x01, 0x15, 0x00, 0x25, 0x7f, 0x81, 0x02, 0x05,
+    0x01, 0x09, 0x33, 0x09, 0x34, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x02, 0x81, 0x02,
+    0x06, 0x00, 0xff, 0x09, 0x21, 0x95, 0x36, 0x81, 0x02,
+    /* Output 0x05 (31 bytes), then the feature reports. */
+    0x85, 0x05, 0x09, 0x22, 0x95, 0x1f, 0x91,
+    0x02, 0x85, 0x04, 0x09, 0x23, 0x95, 0x24, 0xb1, 0x02, 0x85, 0x02, 0x09, 0x24, 0x95, 0x24, 0xb1,
+    0x02, 0x85, 0x08, 0x09, 0x25, 0x95, 0x03, 0xb1, 0x02, 0x85, 0x10, 0x09, 0x26, 0x95, 0x04, 0xb1,
+    0x02, 0x85, 0x11, 0x09, 0x27, 0x95, 0x02, 0xb1, 0x02, 0x85, 0x12, 0x06, 0x02, 0xff, 0x09, 0x21,
+    0x95, 0x0f, 0xb1, 0x02, 0x85, 0x13, 0x09, 0x22, 0x95, 0x16, 0xb1, 0x02, 0x85, 0x14, 0x06, 0x05,
+    0xff, 0x09, 0x20, 0x95, 0x10, 0xb1, 0x02, 0x85, 0x15, 0x09, 0x21, 0x95, 0x2c, 0xb1, 0x02, 0x06,
+    0x80, 0xff, 0x85, 0x80, 0x09, 0x20, 0x95, 0x06, 0xb1, 0x02, 0x85, 0x81, 0x09, 0x21, 0x95, 0x06,
+    0xb1, 0x02, 0x85, 0x82, 0x09, 0x22, 0x95, 0x05, 0xb1, 0x02, 0x85, 0x83, 0x09, 0x23, 0x95, 0x01,
+    0xb1, 0x02, 0x85, 0x84, 0x09, 0x24, 0x95, 0x04, 0xb1, 0x02, 0x85, 0x85, 0x09, 0x25, 0x95, 0x06,
+    0xb1, 0x02, 0x85, 0x86, 0x09, 0x26, 0x95, 0x06, 0xb1, 0x02, 0x85, 0x87, 0x09, 0x27, 0x95, 0x23,
+    0xb1, 0x02, 0x85, 0x88, 0x09, 0x28, 0x95, 0x3f, 0xb1, 0x02, 0x85, 0x89, 0x09, 0x29, 0x95, 0x02,
+    0xb1, 0x02, 0x85, 0x90, 0x09, 0x30, 0x95, 0x05, 0xb1, 0x02, 0x85, 0x91, 0x09, 0x31, 0x95, 0x03,
+    0xb1, 0x02, 0x85, 0x92, 0x09, 0x32, 0x95, 0x03, 0xb1, 0x02, 0x85, 0x93, 0x09, 0x33, 0x95, 0x0c,
+    0xb1, 0x02, 0x85, 0x94, 0x09, 0x34, 0x95, 0x3f, 0xb1, 0x02, 0x85, 0xa0, 0x09, 0x40, 0x95, 0x06,
+    0xb1, 0x02, 0x85, 0xa1, 0x09, 0x41, 0x95, 0x01, 0xb1, 0x02, 0x85, 0xa2, 0x09, 0x42, 0x95, 0x01,
+    0xb1, 0x02, 0x85, 0xa3, 0x09, 0x43, 0x95, 0x30, 0xb1, 0x02, 0x85, 0xa4, 0x09, 0x44, 0x95, 0x0d,
+    0xb1, 0x02, 0x85, 0xf0, 0x09, 0x47, 0x95, 0x3f, 0xb1, 0x02, 0x85, 0xf1, 0x09, 0x48, 0x95, 0x3f,
+    0xb1, 0x02, 0x85, 0xf2, 0x09, 0x49, 0x95, 0x0f, 0xb1, 0x02, 0x85, 0xa7, 0x09, 0x4a, 0x95, 0x01,
+    0xb1, 0x02, 0x85, 0xa8, 0x09, 0x4b, 0x95, 0x01, 0xb1, 0x02, 0x85, 0xa9, 0x09, 0x4c, 0x95, 0x08,
+    0xb1, 0x02, 0x85, 0xaa, 0x09, 0x4e, 0x95, 0x01, 0xb1, 0x02, 0x85, 0xab, 0x09, 0x4f, 0x95, 0x39,
+    0xb1, 0x02, 0x85, 0xac, 0x09, 0x50, 0x95, 0x39, 0xb1, 0x02, 0x85, 0xad, 0x09, 0x51, 0x95, 0x0b,
+    0xb1, 0x02, 0x85, 0xae, 0x09, 0x52, 0x95, 0x01, 0xb1, 0x02, 0x85, 0xaf, 0x09, 0x53, 0x95, 0x02,
+    0xb1, 0x02, 0x85, 0xb0, 0x09, 0x54, 0x95, 0x3f, 0xb1, 0x02, 0x85, 0xe0, 0x09, 0x57, 0x95, 0x02,
+    0xb1, 0x02, 0x85, 0xb3, 0x09, 0x55, 0x95, 0x3f, 0xb1, 0x02, 0x85, 0xb4, 0x09, 0x55, 0x95, 0x3f,
+    0xb1, 0x02, 0x85, 0xb5, 0x09, 0x56, 0x95, 0x3f, 0xb1, 0x02, 0x85, 0xd0, 0x09, 0x58, 0x95, 0x3f,
+    0xb1, 0x02, 0x85, 0xd4, 0x09, 0x59, 0x95, 0x3f, 0xb1, 0x02, 0xc0,
+};
+
+static const uint8_t pad_device_desc[18] = {
+    18, 1, 0x00, 0x02, 0, 0, 0, 64, /* USB 2.0, class per interface, EP0 64 bytes */
+    0x4c, 0x05, 0xcc, 0x09,         /* vendor Sony, product 0x09CC (DualShock 4, second model) */
+    0x00, 0x01, 1, 2, 0, 1,         /* bcdDevice 1.00, manufacturer and product strings, no serial (as the real one), one configuration */
+};
+
+/* Only the controller's HID interface. The real one also carries USB audio interfaces for its
+   headset jack; nothing here plays into a headset, so they are left out and the HID interface
+   is interface 0. Its endpoints keep the real addresses: 0x84 in, 0x03 out, 64 bytes, 5 ms. */
+static const uint8_t pad_config_desc[41] = {
+    9, 2, 41, 0, 1, 1, 0, 0xc0, 0xfa,         /* one interface, self powered, 500 mA */
+    9, 4, 0, 0, 2, 3, 0, 0, 0,                /* interface 0: HID, no boot protocol, two endpoints */
+    9, 0x21, 0x11, 0x01, 0, 1, 0x22, (uint8_t)(sizeof pad_report_desc & 0xff), (uint8_t)(sizeof pad_report_desc >> 8),
+    7, 5, 0x84, 3, 64, 0, 5,                  /* EP4 IN, interrupt, 64 bytes, every 5 ms */
+    7, 5, 0x03, 3, 64, 0, 5,                  /* EP3 OUT, interrupt, 64 bytes, every 5 ms */
+};
+
+static const char *const pad_strings[] = {NULL, "Sony Interactive Entertainment", "Wireless Controller", NULL};
+
+#define PAD_DCI_IN 9  /* EP4 IN */
+#define PAD_DCI_OUT 6 /* EP3 OUT */
+
 static const struct HvXhciDev devs[HV_XHCI_DEVICES] = {
     [HV_XDEV_KBD]    = {kbd_strings, kbd_device_desc, kbd_config_desc, kbd_report_desc, sizeof kbd_report_desc},
     [HV_XDEV_TP]     = {tp_strings, tp_device_desc, tp_config_desc, tp_report_desc, sizeof tp_report_desc},
     [HV_XDEV_CAMERA] = {0},
     [HV_XDEV_MOUSE]  = {ms_strings, ms_device_desc, ms_config_desc, ms_report_desc, sizeof ms_report_desc},
     [HV_XDEV_TABLET] = {tab_strings, tab_device_desc, tab_config_desc, NULL, 0},
+    [HV_XDEV_BT]     = {0}, /* never addressed through devs[]: address_device refuses it */
+    [HV_XDEV_PAD]    = {pad_strings, pad_device_desc, pad_config_desc, pad_report_desc, sizeof pad_report_desc},
 };
 
 /* ---- the Bluetooth dongle on port 6 (HV_XDEV_BT = 5) ---- */
@@ -535,6 +607,83 @@ static void build_tab_desc(HvXhci *x) {
         fprintf(stderr, "hengevm: xhci: tablet descriptor is %d bytes, expected %d\n", i, TAB_DESC_LEN);
 }
 
+/* ---- the game controller's reports ---- */
+
+static uint64_t camera_now(void);
+
+/* The process-wide level: a controller is held to the host. Kept outside any HvXhci, so the
+   host can say so before a Mac starts, or while one is paused. */
+static _Atomic int pad_connected;
+
+/* Build input report 0x01 from a state, under x->mu. Bytes 1-9 are the controller; the rest
+   is what a real DS4 sends lying still on a table and charging: a running timestamp (units
+   of 5.33 us), a steady gyro, gravity on the accelerometer's Y axis (the calibration below
+   puts 1 g near 8100; which axis a still controller reports gravity on is a guess), the
+   battery full on a cable, and no finger on the touch pad (each
+   point's top bit set means "not touching"). */
+static void pad_build_report(HvXhci *x, const HvPadState *s, uint8_t out[HV_PAD_REPORT_LEN]) {
+    memset(out, 0, HV_PAD_REPORT_LEN);
+    out[0] = 0x01;
+    out[1] = s->lx, out[2] = s->ly, out[3] = s->rx, out[4] = s->ry;
+    out[5] = (uint8_t)((s->hat & 0x0f) | (s->buttons & 0x0f) << 4); /* hat, then square cross circle triangle */
+    out[6] = (uint8_t)(s->buttons >> 4);                             /* L1 R1 L2 R2 share options L3 R3 */
+    out[7] = (uint8_t)(((s->buttons >> 12) & 3) | (x->pad_counter & 0x3f) << 2); /* PS, pad click, counter */
+    x->pad_counter = (uint8_t)((x->pad_counter + 1) & 0x3f);
+    out[8] = s->l2, out[9] = s->r2;
+    uint16_t ts = (uint16_t)(camera_now() / 5333);
+    out[10] = (uint8_t)ts, out[11] = (uint8_t)(ts >> 8);
+    out[21] = 0xa4, out[22] = 0x1f;  /* accelerometer Y: 8100 */
+    out[30] = 0x1b;                  /* cable connected, battery level 11 (full) */
+    for (int i = 0; i < 3; i++) {    /* touch packets: none counted (byte 33), both points up */
+        out[35 + 9 * i] = 0x80;
+        out[39 + 9 * i] = 0x80;
+    }
+}
+
+/* Under x->mu: a new state for the guest. */
+static void pad_queue(HvXhci *x, const HvPadState *s) {
+    if (x->pad_qtail != x->pad_qhead) {
+        HvPadState *last = &x->pad_q[(x->pad_qtail - 1) % HV_PAD_REPORTS];
+        if (last->buttons == s->buttons && last->hat == s->hat) { *last = *s; return; } /* a stick moved: merge */
+    }
+    if (x->pad_qtail - x->pad_qhead < HV_PAD_REPORTS) x->pad_q[x->pad_qtail++ % HV_PAD_REPORTS] = *s;
+    else x->pad_q[(x->pad_qtail - 1) % HV_PAD_REPORTS] = *s; /* the guest stopped reading: the newest wins */
+}
+
+static const HvPadState pad_neutral = {0, 8, 0x80, 0x80, 0x80, 0x80, 0, 0};
+
+/* The feature reports the controller answers, report ID first; 0 for one it doesn't. 0x02
+   and 0xA3 are a real DS4's answers over USB (from hid-tools' PS4ControllerUSB); 0x12 is the
+   pairing report: the controller's own Bluetooth address (little-endian, a fixed one under
+   Sony's prefix 1C:66:6D), three constant bytes, then the paired host's address (none). */
+static int pad_feature(int rid, uint8_t *out, int max) {
+    static const uint8_t calibration[37] = {
+        0x02, 0x1e, 0x00, 0x05, 0x00, 0xe2, 0xff, 0xf2, 0x22, 0x4f, 0xdd, 0xbe, 0x22, 0x4d,
+        0xdd, 0x8d, 0x22, 0x39, 0xdd, 0x1c, 0x02, 0x1c, 0x02, 0xe3, 0x1f, 0x8b, 0xdf, 0x8c,
+        0x1e, 0xb4, 0xde, 0x30, 0x20, 0x71, 0xe0, 0x10, 0x00,
+    };
+    static const uint8_t pairing[16] = {
+        0x12, 0x5a, 0x3c, 0x1e, 0x6d, 0x66, 0x1c, 0x08, 0x25, 0x00, 0, 0, 0, 0, 0, 0,
+    };
+    static const uint8_t firmware[49] = {
+        0xa3, 0x41, 0x70, 0x72, 0x20, 0x20, 0x38, 0x20, 0x32, 0x30, 0x31, 0x34, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x30, 0x39, 0x3a, 0x34, 0x36, 0x3a, 0x30, 0x36, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x43, 0x03, 0x00, 0x00, 0x00, 0x51, 0x00, 0x05,
+        0x00, 0x00, 0x80, 0x03, 0x00,
+    };
+    const uint8_t *src = NULL;
+    int len = 0;
+    if (rid == 0x02) src = calibration, len = (int)sizeof calibration;
+    else if (rid == 0x12) src = pairing, len = (int)sizeof pairing;
+    else if (rid == 0x81) src = pairing, len = 7; /* the older MAC report: the same address */
+    else if (rid == 0xa3) src = firmware, len = (int)sizeof firmware;
+    else return 0;
+    if (len > max) len = max;
+    memcpy(out, src, (size_t)len);
+    if (rid == 0x81 && len > 0) out[0] = 0x81;
+    return len;
+}
+
 /* Answer a SETUP on endpoint 0. Returns the reply length (data to send for IN
    requests), or -1 to stall. */
 static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, int max) {
@@ -551,18 +700,25 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
         fprintf(stderr, "hengevm: xhci: tp request %02x %02x value %04x index %04x len %u\n",
                 type, req, value, setup[4] | setup[5] << 8, setup[6] | setup[7] << 8);
     }
+    /* The controller's too: which feature reports macOS's driver asks for at attach is
+       exactly what a first boot has to show. */
+    if (x->slots[slot].dev == HV_XDEV_PAD && x->pad_reqs < 60) {
+        x->pad_reqs++;
+        fprintf(stderr, "hengevm: xhci: gamepad request %02x %02x value %04x index %04x len %u\n",
+                type, req, value, setup[4] | setup[5] << 8, setup[6] | setup[7] << 8);
+    }
     const uint8_t *src = NULL;
     int len = 0;
     uint8_t tmp[HV_TP_REPORT_LEN + 8];
     if (type == 0x80 && req == 6) { /* GET_DESCRIPTOR (device) */
         uint8_t dt = value >> 8, idx = value & 0xff;
         if (dt == 1) src = d->device_desc, len = 18;
-        else if (dt == 2) src = d->config_desc, len = 34;
+        else if (dt == 2) src = d->config_desc, len = d->config_desc[2] | d->config_desc[3] << 8; /* wTotalLength */
         else if (dt == 3) {
             if (idx == 0) {
                 tmp[0] = 4, tmp[1] = 3, tmp[2] = 0x09, tmp[3] = 0x04; /* English (US) */
                 src = tmp, len = 4;
-            } else if (idx < 4) {
+            } else if (idx < 4 && d->strings[idx]) { /* the controller has no serial string */
                 const char *s = d->strings[idx];
                 int n = (int)strlen(s);
                 tmp[0] = (uint8_t)(2 + 2 * n), tmp[1] = 3;
@@ -592,6 +748,12 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
         src = tmp, len = 1;
     } else if (type == 0x00 && req == 9) { /* SET_CONFIGURATION */
         x->slots[slot].configured = value & 0xff;
+        if (x->slots[slot].dev == HV_XDEV_PAD && (value & 0xff)) { /* a fresh controller says where it stands at once */
+            pthread_mutex_lock(&x->mu);
+            x->pad_qhead = x->pad_qtail = 0; /* presses from before anyone read the controller are not replayed */
+            pad_queue(x, &x->pad_cur);
+            pthread_mutex_unlock(&x->mu);
+        }
         return 0;
     } else if (type == 0x81 && req == 10) { /* GET_INTERFACE */
         tmp[0] = 0;
@@ -614,6 +776,23 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
             tmp[5] = 0;
             pthread_mutex_unlock(&x->mu);
             src = tmp, len = 6;
+        } else if (x->slots[slot].dev == HV_XDEV_PAD) {
+            int rtype = value >> 8, rid = value & 0xff;
+            if (rtype == 1) { /* input: the current state */
+                pthread_mutex_lock(&x->mu);
+                pad_build_report(x, &x->pad_cur, tmp);
+                pthread_mutex_unlock(&x->mu);
+                src = tmp, len = HV_PAD_REPORT_LEN;
+            } else if (rtype == 3) { /* feature: the blobs drivers read; zeros for the rest, as all are declared */
+                len = pad_feature(rid, tmp, 64);
+                if (!len) {
+                    memset(tmp, 0, 64);
+                    tmp[0] = (uint8_t)rid;
+                    len = 64;
+                }
+                src = tmp;
+            } else
+                return -1;
         } else {
             int rtype = value >> 8, rid = value & 0xff;
             if (rtype == 3) { /* feature: the sensor-configuration registers */
@@ -646,7 +825,8 @@ static int control(HvXhci *x, int slot, const uint8_t setup[8], uint8_t *out, in
             }
         }
     } else if (type == 0xa1 && (req == 2 || req == 3)) { /* GET_IDLE, GET_PROTOCOL */
-        tmp[0] = req == 3 ? (x->slots[slot].dev == HV_XDEV_TABLET || x->slots[slot].dev == HV_XDEV_MOUSE ? 0 : 1) : 0;
+        tmp[0] = req == 3 ? (x->slots[slot].dev == HV_XDEV_TABLET || x->slots[slot].dev == HV_XDEV_MOUSE ||
+                             x->slots[slot].dev == HV_XDEV_PAD ? 0 : 1) : 0;
         src = tmp, len = 1;
     } else if ((type & 0x60) == 0x20 || (type == 0x00 && (req == 1 || req == 3)) || (type == 0x01 && req == 11) ||
                (type == 0x02 && (req == 1 || req == 3)) ||
@@ -928,6 +1108,7 @@ static void run_bt_eps(HvXhci *x) {
 static void run_ep0(HvXhci *x, int slot) {
     struct HvXhciSlot *s = &x->slots[slot];
     if (s->dev == 2 && (!(x->portsc[2] & PORT_CCS) || s->camera_generation != x->camera_generation)) return;
+    if (s->dev == HV_XDEV_PAD && (!x->pad_present || s->pad_generation != x->pad_generation)) return;
     HvXhciRing *r = &x->slots[slot].ep[1];
     uint32_t trb[4];
     uint64_t at;
@@ -1087,10 +1268,48 @@ static void run_camera(HvXhci *x, int slot) {
     }
 }
 
+/* The controller's two endpoints. Its OUT endpoint carries output report 0x05 (rumble and
+   the light bar): each transfer is taken and completed, since a writer waiting on one that
+   never completes would stall. Its IN endpoint gets the waiting states, one report each. */
+static void run_pad(HvXhci *x, int slot) {
+    struct HvXhciSlot *s = &x->slots[slot];
+    if (!x->pad_present || s->pad_generation != x->pad_generation) return; /* unplugged: the guest drops the slot */
+    uint32_t trb[4];
+    uint64_t at;
+    if (s->ep_running[PAD_DCI_OUT]) {
+        HvXhciRing *r = &s->ep[PAD_DCI_OUT];
+        for (unsigned budget = 0; budget < 64 && ring_peek(x, r, trb, &at); budget++) {
+            int type = (trb[3] >> 10) & 0x3f;
+            ring_advance(r);
+            if (type != TRB_NORMAL) continue;
+            transfer_event(x, at, CC_SUCCESS, 0, slot, PAD_DCI_OUT);
+        }
+    }
+    if (!s->ep_running[PAD_DCI_IN]) return;
+    HvXhciRing *r = &s->ep[PAD_DCI_IN];
+    pthread_mutex_lock(&x->mu);
+    while (x->pad_qhead != x->pad_qtail && ring_peek(x, r, trb, &at)) {
+        int type = (trb[3] >> 10) & 0x3f;
+        ring_advance(r);
+        if (type != TRB_NORMAL) continue;
+        uint64_t buf = (uint64_t)trb[1] << 32 | trb[0];
+        uint32_t want = trb[2] & 0x1ffff;
+        uint8_t report[HV_PAD_REPORT_LEN];
+        pad_build_report(x, &x->pad_q[x->pad_qhead % HV_PAD_REPORTS], report);
+        x->pad_qhead++;
+        x->pad_delivered++;
+        uint32_t n = want < HV_PAD_REPORT_LEN ? want : HV_PAD_REPORT_LEN;
+        wr(x, buf, report, n);
+        transfer_event(x, at, n < want ? CC_SHORT_PACKET : CC_SUCCESS, want - n, slot, PAD_DCI_IN);
+    }
+    pthread_mutex_unlock(&x->mu);
+}
+
 /* Give the device's waiting reports to the interrupt IN endpoint's posted transfers. */
 static void run_ep_in(HvXhci *x, int slot) {
     struct HvXhciSlot *s = &x->slots[slot];
     if (s->dev == 2) { run_camera(x, slot); return; }
+    if (s->dev == HV_XDEV_PAD) { run_pad(x, slot); return; }
     int dci = -1;
     for (int d = 2; d < HV_XHCI_EPS; d++) if (s->ep_running[d]) { dci = d; break; }
     if (s->dev < 0 || dci < 0) return;
@@ -1205,9 +1424,12 @@ static int address_device(HvXhci *x, int slot, uint64_t input, int bsr) {
     int is_bt = (port == HV_XDEV_BT + 1 && x->bt_present);
     if (!is_bt) {
         int dev = port - 1;
-        if (dev < 0 || dev >= HV_XHCI_DEVICES) return CC_TRB_ERROR;
+        /* Port 6 without the dongle is empty, and so is port 7 without a controller: devs[] has nothing to answer with. */
+        if (dev < 0 || dev >= HV_XHCI_DEVICES || dev == HV_XDEV_BT) return CC_TRB_ERROR;
+        if (dev == HV_XDEV_PAD && !x->pad_present) return CC_TRB_ERROR;
         x->slots[slot].dev = dev;
         x->slots[slot].camera_generation = x->camera_generation;
+        x->slots[slot].pad_generation = x->pad_generation;
     } else {
         x->slots[slot].dev = -1;
     }
@@ -1373,10 +1595,12 @@ static void run_commands(HvXhci *x) {
 /* ---- ports ---- */
 
 /* Port 1 is the full-speed keyboard; ports 2 and 3 are the high-speed trackpad
-   and UVC camera; port 4 is the full-speed 5-button mouse. */
+   and UVC camera; port 4 is the full-speed 5-button mouse; ports 5 to 7 (tablet,
+   Bluetooth dongle, game controller) are full speed too. */
 static uint32_t port_attached(const HvXhci *x, int p) {
     if (p == HV_XDEV_MOUSE && x->ms_unplugged) return PORT_PP; /* powered, nothing in it */
     if (p == HV_XDEV_BT && !x->bt_present) return PORT_PP;
+    if (p == HV_XDEV_PAD && !x->pad_present) return PORT_PP;
     uint32_t speed = (p == HV_XDEV_TP || p == HV_XDEV_CAMERA) ? SPEED_HIGH : SPEED_FULL;
     return PORT_PP | PORT_CCS | PORT_CSC | speed << PORT_SPEED_SHIFT | 7u << PORT_PLS_SHIFT;
 }
@@ -1449,6 +1673,12 @@ static void reset(HvXhci *x) {
     x->tab_wheel = 0;
     x->tab_dirty = 0;
     x->tab_delivered = 0;
+    pthread_mutex_lock(&x->mu);
+    x->pad_qhead = x->pad_qtail = 0; /* the controller's latest state stays: it is still held that way */
+    x->pad_counter = 0;
+    pthread_mutex_unlock(&x->mu);
+    x->pad_reqs = 0;
+    x->pad_delivered = 0;
     pthread_mutex_lock(&x->bt_mu);
     memset(x->bep_running, 0, sizeof x->bep_running);
     x->bt_slot = 0;
@@ -1820,6 +2050,7 @@ void hv_xhci_resume(HvXhci *x) {
     if (!x) return;
     hv_usb_camera_resume(&x->camera);
     if (x->camera_reconnect_ns) x->camera_reconnect_ns = camera_now() + 300000000;
+    if (x->pad_replug_ns) x->pad_replug_ns = camera_now() + 300000000; /* a saved deadline is another clock's */
 }
 
 /* ---- the mouse's reports ---- */
@@ -1978,8 +2209,62 @@ int hv_xhci_bt_adv_active(HvXhci *x, uint8_t *out, uint32_t cap, uint32_t *out_l
     return active;
 }
 
+void hv_xhci_gamepad_set_connected(int connected) { atomic_store(&pad_connected, connected ? 1 : 0); }
+
+void hv_xhci_gamepad_state(HvXhci *x, uint32_t buttons, int hat, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry,
+                           uint8_t l2, uint8_t r2) {
+    if (!x || x->pad_disabled) return;
+    HvPadState s = {buttons & 0x3fff, (uint8_t)(hat >= 0 && hat <= 7 ? hat : 8), lx, ly, rx, ry, l2, r2};
+    pthread_mutex_lock(&x->mu);
+    x->pad_cur = s;
+    pad_queue(x, &s);
+    pthread_mutex_unlock(&x->mu);
+    hv_machine_wake(x->m);
+}
+
+int hv_xhci_gamepad_ready(const HvXhci *x) {
+    if (!x || !x->pad_present) return 0;
+    for (int slot = 1; slot <= HV_XHCI_SLOTS; slot++)
+        if (x->slots[slot].dev == HV_XDEV_PAD && x->slots[slot].pad_generation == x->pad_generation &&
+            x->slots[slot].ep_running[PAD_DCI_IN])
+            return 1;
+    return 0;
+}
+
+/* CPU thread: move port 7 toward the host's level, the way the camera reconnects. An unplug
+   reports at once; a plug-in waits until the guest has acknowledged the last unplug and a
+   moment has passed, so it never meets a slot macOS is still tearing down. With the
+   controller halted the port only takes the new state: starting it reports the change. */
+static void pad_reconcile(HvXhci *x) {
+    if (x->pad_disabled) return;
+    int want = atomic_load(&pad_connected);
+    uint32_t *ps = &x->portsc[HV_XDEV_PAD];
+    if (want == x->pad_present) return;
+    if (!(x->usbcmd & 1)) {
+        if (!want) x->pad_generation++;
+        x->pad_present = want;
+        *ps = port_attached(x, HV_XDEV_PAD);
+        return;
+    }
+    if (!want) {
+        x->pad_present = 0;
+        x->pad_generation++;
+        *ps = (*ps & ~(PORT_CCS | PORT_PED)) | PORT_CSC;
+        x->pad_replug_ns = camera_now() + 300000000;
+        port_event(x, HV_XDEV_PAD);
+    } else if (!(*ps & PORT_CSC) && camera_now() >= x->pad_replug_ns) {
+        pthread_mutex_lock(&x->mu);
+        x->pad_qhead = x->pad_qtail = 0; /* nothing from before the plug-in */
+        pthread_mutex_unlock(&x->mu);
+        x->pad_present = 1;
+        *ps = port_attached(x, HV_XDEV_PAD);
+        port_event(x, HV_XDEV_PAD);
+    }
+}
+
 void hv_xhci_poll(HvXhci *x) {
     if (!x) return;
+    pad_reconcile(x);
     if (hv_usb_camera_apply_profile(&x->camera)) {
         x->camera_generation++;
         if (x->usbcmd & 1) {
@@ -2029,6 +2314,9 @@ HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus) {
     x->pci.config[0x61] = 0x20; /* FLADJ default */
     const char *mouse = getenv("HV_USB_MOUSE");
     x->ms_unplugged = mouse && !strcmp(mouse, "0");
+    x->pad_disabled = getenv("HV_NO_GAMEPAD") != NULL;
+    x->pad_present = !x->pad_disabled && atomic_load(&pad_connected);
+    x->pad_cur = pad_neutral;
     if (hv_pcie_attach(bus, &x->pci) < 0) {
         hv_xhci_destroy(x);
         return NULL;
