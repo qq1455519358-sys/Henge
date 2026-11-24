@@ -1,5 +1,6 @@
 // Runs inside macOS on a Henge virtual Mac, as a LaunchAgent. It keeps the clipboard in step with the device,
-// and keeps the shared folder mounted. It talks to host/share.c at 10.0.2.4, which only exists inside Henge.
+// keeps the shared folder (and any external USB drive at ~/Henge/External) mounted, and shows live physical
+// host battery, charging, thermal, and Wi-Fi status in the macOS menu bar.
 #import <AppKit/AppKit.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -60,6 +61,7 @@ static NSData *request(NSString *method, NSString *path, NSData *body, int *stat
 }
 
 static NSInteger lastChange;
+static NSString *mountPoint(void) { return [NSHomeDirectory() stringByAppendingPathComponent:@"Henge"]; }
 
 // The device's clipboard, as it changes. The server holds each request until there is something new.
 static void followDevice(void) {
@@ -73,7 +75,7 @@ static void followDevice(void) {
             continue;
         }
         BOOL news = !first && status == 200 && now != seq;
-        seq = now; // what the device had before this helper started isn't news
+        seq = now;
         if (!news) continue;
         NSString *text = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
         if (!text) continue;
@@ -101,8 +103,6 @@ static void checkClipboard(void) {
     });
 }
 
-static NSString *mountPoint(void) { return [NSHomeDirectory() stringByAppendingPathComponent:@"Henge"]; }
-
 // The shared folder, at ~/Henge. mount_webdav needs an empty folder it owns, and is a no-op failure if it is mounted.
 static void keepMounted(void) {
     NSString *point = mountPoint();
@@ -118,14 +118,126 @@ static void keepMounted(void) {
     [task launchAndReturnError:NULL];
 }
 
+@interface HengeMenuController : NSObject
+@property (nonatomic, strong) NSStatusItem *statusItem;
+@property (nonatomic, strong) NSMenuItem *hostItem;
+@property (nonatomic, strong) NSMenuItem *networkItem;
+@property (nonatomic, strong) NSMenuItem *thermalItem;
+@property (nonatomic, strong) NSMenuItem *externalInfoItem;
+@property (nonatomic, strong) NSMenuItem *openExternalItem;
+- (void)setup;
+- (void)refreshStatus;
+@end
+
+@implementation HengeMenuController
+
+- (void)setup {
+    self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
+    self.statusItem.button.title = @"iPad";
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Henge Host"];
+    menu.autoenablesItems = NO;
+
+    self.hostItem = [[NSMenuItem alloc] initWithTitle:@"Host: Connecting…" action:nil keyEquivalent:@""];
+    self.hostItem.enabled = NO;
+    [menu addItem:self.hostItem];
+
+    self.networkItem = [[NSMenuItem alloc] initWithTitle:@"Network: —" action:nil keyEquivalent:@""];
+    self.networkItem.enabled = NO;
+    [menu addItem:self.networkItem];
+
+    self.thermalItem = [[NSMenuItem alloc] initWithTitle:@"Thermal: Normal" action:nil keyEquivalent:@""];
+    self.thermalItem.enabled = NO;
+    [menu addItem:self.thermalItem];
+
+    self.externalInfoItem = [[NSMenuItem alloc] initWithTitle:@"External Drive: Not mounted" action:nil keyEquivalent:@""];
+    self.externalInfoItem.enabled = NO;
+    [menu addItem:self.externalInfoItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *openShared = [[NSMenuItem alloc] initWithTitle:@"Open Shared Folder (~/Henge)" action:@selector(openSharedFolder:) keyEquivalent:@""];
+    openShared.target = self;
+    openShared.enabled = YES;
+    [menu addItem:openShared];
+
+    self.openExternalItem = [[NSMenuItem alloc] initWithTitle:@"Open External USB Drive (~/Henge/External)" action:@selector(openExternalDrive:) keyEquivalent:@""];
+    self.openExternalItem.target = self;
+    self.openExternalItem.enabled = NO;
+    [menu addItem:self.openExternalItem];
+
+    self.statusItem.menu = menu;
+}
+
+- (void)openSharedFolder:(id)sender {
+    (void)sender;
+    [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:mountPoint()]];
+}
+
+- (void)openExternalDrive:(id)sender {
+    (void)sender;
+    NSString *ext = [mountPoint() stringByAppendingPathComponent:@"External"];
+    [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:ext]];
+}
+
+- (void)refreshStatus {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        int status = 0;
+        NSData *body = request(@"GET", @"/.henge/status", nil, &status, NULL);
+        if (!body || status != 200) return;
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:body options:0 error:NULL];
+        if (![json isKindOfClass:[NSDictionary class]]) return;
+        NSNumber *batNum = json[@"battery"];
+        BOOL charging = [json[@"charging"] boolValue];
+        NSString *device = [json[@"device"] isKindOfClass:[NSString class]] ? json[@"device"] : @"iPad";
+        NSString *net = [json[@"network"] isKindOfClass:[NSString class]] ? json[@"network"] : @"Online";
+        NSString *ip = [json[@"ip"] isKindOfClass:[NSString class]] ? json[@"ip"] : @"";
+        NSString *thermal = [json[@"thermal"] isKindOfClass:[NSString class]] ? json[@"thermal"] : @"Normal";
+        NSString *ext = [json[@"external"] isKindOfClass:[NSString class]] ? json[@"external"] : @"";
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            int pct = batNum ? batNum.intValue : -1;
+            if (pct >= 0) {
+                self.statusItem.button.title = [NSString stringWithFormat:@"iPad %d%%%@", pct, charging ? @" ⚡" : @""];
+                self.hostItem.title = [NSString stringWithFormat:@"%@ · Battery %d%%%@", device, pct, charging ? @" (Charging)" : @""];
+            } else {
+                self.statusItem.button.title = @"iPad";
+                self.hostItem.title = device;
+            }
+            self.networkItem.title = ip.length ? [NSString stringWithFormat:@"Network: %@ (%@)", net, ip]
+                                               : [NSString stringWithFormat:@"Network: %@", net];
+            self.thermalItem.title = [NSString stringWithFormat:@"Thermal: %@", thermal];
+            if (ext.length) {
+                self.externalInfoItem.title = [NSString stringWithFormat:@"External Drive: %@", ext];
+                self.openExternalItem.enabled = YES;
+            } else {
+                self.externalInfoItem.title = @"External Drive: Not mounted";
+                self.openExternalItem.enabled = NO;
+            }
+        });
+    });
+}
+
+@end
+
 int main(void) {
     @autoreleasepool {
+        NSApplication *app = [NSApplication sharedApplication];
+        [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        HengeMenuController *menuCtrl = [HengeMenuController new];
+        [menuCtrl setup];
+        [menuCtrl refreshStatus];
+
         lastChange = NSPasteboard.generalPasteboard.changeCount;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ followDevice(); });
         keepMounted();
-        [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer) { (void)timer; checkClipboard(); }];
-        [NSTimer scheduledTimerWithTimeInterval:30 repeats:YES block:^(NSTimer *timer) { (void)timer; keepMounted(); }];
-        [NSRunLoop.mainRunLoop run];
+
+        NSTimer *clipTimer = [NSTimer timerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer) { (void)timer; checkClipboard(); }];
+        NSTimer *mountTimer = [NSTimer timerWithTimeInterval:30 repeats:YES block:^(NSTimer *timer) { (void)timer; keepMounted(); }];
+        NSTimer *statusTimer = [NSTimer timerWithTimeInterval:8 repeats:YES block:^(NSTimer *timer) { (void)timer; [menuCtrl refreshStatus]; }];
+        [NSRunLoop.mainRunLoop addTimer:clipTimer forMode:NSRunLoopCommonModes];
+        [NSRunLoop.mainRunLoop addTimer:mountTimer forMode:NSRunLoopCommonModes];
+        [NSRunLoop.mainRunLoop addTimer:statusTimer forMode:NSRunLoopCommonModes];
+        [app run];
     }
     return 0;
 }

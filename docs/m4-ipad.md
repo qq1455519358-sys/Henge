@@ -1,8 +1,8 @@
-# Henge on an M4 iPad Pro (0.4.0 Supercharged Build)
+# Henge on an M4 iPad Pro (`0.5.0` Supercharged + Full Physical Hardware Build)
 
 What this branch (`m4-ipad`) adds on top of `Leviidev/Henge`, tuned specifically for a 13" M4 iPad Pro (`iPad16,5`, 1–2 TB / 16 GB RAM, 4 P-cores + 6 E-cores, iPadOS 27).
 
-## Integrated Engine & Platform Upgrades
+## 1. Integrated Engine & Speed Upgrades
 
 1. **16 GB Guest RAM Address-Space Fix (`PR #121` / `PR #211`)**
    - Releases the 60 GB high virtual-address reservation (`henge_ios_hold_high`) before sizing or booting a virtual Mac, expanding contiguous guest RAM mapping from ~2.5 GB to ~16.9 GB so 16 GB iPads can allocate **8–10 GB guest RAM** outside the app footprint.
@@ -19,7 +19,21 @@ What this branch (`m4-ipad`) adds on top of `Leviidev/Henge`, tuned specifically
 7. **M4 CPU Features (`BF16` & `I8MM`) and Host Identity**
    - Offers `FEAT_BF16` and `FEAT_I8MM` vector instructions natively when supported by the host chip (`HV_CPU_FEATURES=m1` disables; `HV_MIDR=m4` reports Apple M4 MIDR `0x611f0520`).
 
-## Recommended Settings for 13" M4 iPad Pro (1–2 TB, 16 GB)
+## 2. Full Physical iPad Hardware Suite (`0.5.0`)
+
+All six USB peripherals coexist on a unified 6-port xHCI 1.0 Root Hub (`HV_XHCI_SLOTS=12`):
+
+- **Port 1 (`HV_XDEV_KBD`)**: Apple Virtual USB HID Keyboard + Mac system shortcut pass-through (`⌘Space`, `⌘Tab`, `⌘Q`, `⌘W`, `⌘H`, `.defersSystemGestures`).
+- **Port 2 (`HV_XDEV_TP`)**: Apple Magic Trackpad 2 native multi-touch gestures (two-finger inertial scroll, three-finger Mission Control / Spaces).
+- **Port 3 (`HV_XDEV_CAMERA`) + `virtio-snd` Capture (`PR #100`)**: Live Front & Back iPad Camera (`UVC` MJPEG up to 1080p with horizontal flip & live switching) + `48 kHz` physical Microphone input.
+- **Port 4 (`HV_XDEV_MOUSE`) + `HengeAudio` + Logitech BLE HID++ (`PR #191`)**: 5-button wheel mouse, Logitech BLE HID++ direct pointer channel, and automatic Bluetooth/AirPods audio route recovery.
+- **Port 5 (`HV_XDEV_TABLET`) (`PR #90` + Auto-Pencil)**: Sub-pixel absolute USB tablet digitizer with palm rejection — touching the Mac screen with **Apple Pencil** automatically engages direct sub-pixel pen input even while finger gestures stay in Magic Trackpad mode.
+- **Port 6 (`HV_XDEV_BT`) + `CoreBluetooth` Live Radio Bridge (`PR #84` + `BluetoothBridge.swift`)**: Broadcom `BCM20702A0` USB Bluetooth HCI controller (`bt-transport-override=10`) wired directly to iPadOS `CBCentralManager` & `CBPeripheralManager`, forwarding real physical BLE peripherals (`0x0D` Extended & `0x02` Legacy Advertising Reports) into macOS System Settings › Bluetooth and advertising guest BLE services out over the iPad's radio.
+- **Zero-Copy External USB-C Drive Mount (`share.c` + `Sharing.swift`)**: Mount any USB-C SSD, flash drive, or Files folder in **Details › Sharing** directly into `~/Henge/External` on macOS with zero copying and cross-volume Finder `MOVE` support.
+- **Live iPad Battery, Charging & Wi-Fi Menu Bar (`HostStatusBridge.swift` + `henge-agent.m`)**: Streams real-time iPad battery percentage, charging status (`⚡`), thermal state, Wi-Fi/Ethernet IPv4 address, and external USB drive status to a native macOS menu bar item (`iPad 94% ⚡`).
+- **Physical Gamepad Bridge (`GamepadBridge.swift`)**: Maps connected DualSense, Xbox, and MFi controllers (`GCController`) to 60 Hz Mac cursor/scroll, `WASD`, arrow keys, clicks, and Spotlight.
+
+## 3. Recommended Settings for 13" M4 iPad Pro (1–2 TB, 16 GB)
 
 | Setting | Where | Recommended Value | Why |
 |---|---|---|---|

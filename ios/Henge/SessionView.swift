@@ -1,5 +1,6 @@
 import SwiftUI
 import GameController
+import UniformTypeIdentifiers
 
 /// A running Mac. Upright, its screen sits above a trackpad; on its side the screen fills the device
 /// and is its own trackpad. Zoomed in, the screen fills the device either way and follows the pointer.
@@ -10,6 +11,11 @@ struct SessionView: View {
 
     @StateObject private var display = DisplayRouter()
     @StateObject private var media = GuestMediaCapture()
+    @ObservedObject private var btBridge = BluetoothBridge.shared
+    @ObservedObject private var hostStatus = HostStatusBridge.shared
+    @ObservedObject private var gamepad = GamepadBridge.shared
+    @State private var pickingExternalFolder = false
+    @State private var externalFolderName: String? = Sharing.externalLabel
     @State private var error: String?
     @State private var state: Int32 = 0
     @State private var bootAttempt = 0
@@ -244,6 +250,10 @@ struct SessionView: View {
             VendorMice.shared.setExternalDisplay(display.isExternal)
             HardwareMouse.shared.start()
             VolumeClicks.shared.start()
+            BluetoothBridge.shared.start()
+            HostStatusBridge.shared.start()
+            GamepadBridge.shared.start()
+            externalFolderName = Sharing.externalLabel
         }
         .onDisappear {
             media.stop()
@@ -258,6 +268,9 @@ struct SessionView: View {
             henge_vm_mouse_button(2, 0)
             HardwareMouse.shared.stop()
             VolumeClicks.shared.stop()
+            BluetoothBridge.shared.stop()
+            HostStatusBridge.shared.stop()
+            GamepadBridge.shared.stop()
         }
         .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
         .task(id: bootAttempt) { await run() }
@@ -589,9 +602,30 @@ struct SessionView: View {
                             }
                         }
                     }
+                    LabeledContent("External USB / folder", value: externalFolderName ?? "None")
+                    Button(externalFolderName == nil ? "Mount External USB Drive or Folder…" : "Change External USB Drive or Folder…") {
+                        pickingExternalFolder = true
+                    }
+                    if externalFolderName != nil {
+                        Button("Unmount External Folder", role: .destructive) {
+                            Sharing.unmountExternalFolder()
+                            externalFolderName = nil
+                        }
+                    }
                     Text(helperRunning
-                         ? "Put files in Files, Henge, Shared to see them in the Henge folder in this Mac's home folder. What you copy on the Mac is copied here too, and the paste button pastes from here into the Mac."
+                         ? "Put files in Files, Henge, Shared to see them in ~/Henge on the Mac, or mount any USB-C SSD / flash drive directly at ~/Henge/External with zero copying. If you set up henge-agent before 0.5.0, re-run \(Sharing.setUpCommand) once to enable the live iPad battery & Wi-Fi menu bar item."
                          : "Once for each Mac: open Terminal on the Mac, tap Type the Set Up Command, then press Return. When macOS asks about henge-agent and local networks, choose Allow. It types \(Sharing.setUpCommand) and needs the Mac's keyboard layout to be U.S.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("Bluetooth & Peripherals") {
+                    Toggle("Live Bluetooth LE radio", isOn: $btBridge.isEnabled)
+                    LabeledContent("Bluetooth HCI", value: btBridge.statusText)
+                    Toggle("Physical gamepad input", isOn: $gamepad.isEnabled)
+                    LabeledContent("Gamepad", value: gamepad.controllerName ?? "None connected")
+                    LabeledContent("iPad host status", value: hostStatus.batteryPercent >= 0
+                                   ? "\(hostStatus.batteryPercent)%\(hostStatus.isCharging ? " ⚡" : "") · \(hostStatus.networkKind)\(hostStatus.ipAddress.isEmpty ? "" : " (\(hostStatus.ipAddress))")"
+                                   : hostStatus.networkKind)
+                    Text("Forwards nearby physical Bluetooth LE devices into macOS System Settings › Bluetooth via the Broadcom BCM20702A0 USB HCI controller, maps connected DualSense/Xbox controllers, and streams live iPad battery, charging, thermal, and Wi-Fi status to the macOS menu bar.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Camera") {
@@ -657,6 +691,11 @@ struct SessionView: View {
             }
             .navigationTitle("Details")
             .navigationBarTitleDisplayMode(.inline)
+            .fileImporter(isPresented: $pickingExternalFolder, allowedContentTypes: [.folder]) { result in
+                if case .success(let url) = result, Sharing.mountExternalFolder(url) {
+                    externalFolderName = Sharing.externalLabel
+                }
+            }
         }
     }
 
@@ -701,6 +740,8 @@ struct SessionView: View {
         var buffer = [CChar](repeating: 0, count: 256)
         JITBootstrap.releaseLingeringDebugger()
         Sharing.prepare()
+        externalFolderName = Sharing.externalLabel
+        HostStatusBridge.shared.pushNow()
         EngineTuning.apply()
         Trackpad.guestScreenWidth = mac.screen.width
         Trackpad.guestScreenHeight = mac.screen.height

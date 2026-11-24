@@ -15,5 +15,9 @@ void hv_share_set_clipboard(const char *text);
 char *hv_share_take_clipboard(void);
 /* Seconds since the helper in macOS was last heard from, or -1 if it never has been. */
 long hv_share_agent_seen(void);
+/* Mount or unmount (path == NULL) an external USB drive or security-scoped folder at /External. */
+void hv_share_set_external_root(const char *path, const char *label);
+/* Publish live host telemetry JSON (battery, charging, thermal, Wi-Fi IP) served at /.henge/status. */
+void hv_share_set_host_status(const char *json);
 
 #endif

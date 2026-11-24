@@ -102,6 +102,20 @@ targets:
           - "CoreVideo"
           - "-framework"
           - "UniformTypeIdentifiers"
+          - "-framework"
+          - "AVFoundation"
+          - "-framework"
+          - "CoreMedia"
+          - "-framework"
+          - "VideoToolbox"
+          - "-framework"
+          - "Accelerate"
+          - "-framework"
+          - "CoreBluetooth"
+          - "-framework"
+          - "GameController"
+          - "-framework"
+          - "Network"
     dependencies:
       # Built-in StikJIT's debugger process. Embedded into PlugIns/.
       - target: HengeJITHelper

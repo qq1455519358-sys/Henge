@@ -36,6 +36,10 @@
 
 static char root[PATH_MAX];
 static char agent_path[PATH_MAX];
+static pthread_mutex_t ext_mu = PTHREAD_MUTEX_INITIALIZER;
+static char ext_root[PATH_MAX];
+static char ext_label[128];
+static char host_status[1024] = "{}";
 
 /* ---- the clipboard ---- */
 
@@ -68,6 +72,26 @@ long hv_share_agent_seen(void) {
     long ago = agent_seen ? (long)(time(NULL) - agent_seen) : -1;
     pthread_mutex_unlock(&clip_mu);
     return ago;
+}
+
+void hv_share_set_external_root(const char *path, const char *label) {
+    pthread_mutex_lock(&ext_mu);
+    if (path && path[0]) {
+        if (!realpath(path, ext_root)) snprintf(ext_root, sizeof ext_root, "%s", path);
+        size_t n = strlen(ext_root);
+        while (n > 1 && ext_root[n - 1] == '/') ext_root[--n] = 0;
+        snprintf(ext_label, sizeof ext_label, "%s", (label && label[0]) ? label : "External");
+    } else {
+        ext_root[0] = 0;
+        ext_label[0] = 0;
+    }
+    pthread_mutex_unlock(&ext_mu);
+}
+
+void hv_share_set_host_status(const char *json) {
+    pthread_mutex_lock(&clip_mu);
+    snprintf(host_status, sizeof host_status, "%s", (json && json[0]) ? json : "{}");
+    pthread_mutex_unlock(&clip_mu);
 }
 
 /* ---- connections ---- */
@@ -299,7 +323,12 @@ static int decode_path(const char *in, char *out, size_t cap) {
 }
 
 static int local_path(const char *path, char *out, size_t cap) {
-    int n = snprintf(out, cap, "%s%s", root, path);
+    int n = -1;
+    pthread_mutex_lock(&ext_mu);
+    int is_ext = ext_root[0] && (!strcmp(path, "/External") || !strncmp(path, "/External/", 10));
+    if (is_ext) n = snprintf(out, cap, "%s%s", ext_root, path + 9);
+    pthread_mutex_unlock(&ext_mu);
+    if (!is_ext) n = snprintf(out, cap, "%s%s", root, path);
     if (n < 0 || (size_t)n >= cap) return -1;
     while (n > 1 && out[n - 1] == '/') out[--n] = 0;
     return 0;
@@ -351,10 +380,17 @@ static int do_propfind(Conn *c, Request *r) {
     int is_root = strcmp(r->path, "/") == 0;
     add_entry(&t, r->path, is_root ? "Henge" : (slash && slash[1] ? slash + 1 : r->path), &st, is_root);
     if (S_ISDIR(st.st_mode) && r->depth != 0) {
+        char ext_local[PATH_MAX] = {0};
+        if (is_root) {
+            pthread_mutex_lock(&ext_mu);
+            if (ext_root[0]) snprintf(ext_local, sizeof ext_local, "%s", ext_root);
+            pthread_mutex_unlock(&ext_mu);
+        }
         DIR *d = opendir(local);
         struct dirent *e;
         while (d && (e = readdir(d))) {
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || !strncmp(e->d_name, TEMP_PREFIX, strlen(TEMP_PREFIX))) continue;
+            if (is_root && ext_local[0] && !strcmp(e->d_name, "External")) continue;
             char child[PATH_MAX], url[PATH_MAX];
             struct stat cs;
             if (snprintf(child, sizeof child, "%s/%s", local, e->d_name) >= (int)sizeof child) continue;
@@ -363,6 +399,9 @@ static int do_propfind(Conn *c, Request *r) {
             add_entry(&t, url, e->d_name, &cs, 0);
         }
         if (d) closedir(d);
+        struct stat est;
+        if (is_root && ext_local[0] && stat(ext_local, &est) == 0 && S_ISDIR(est.st_mode))
+            add_entry(&t, "/External", "External", &est, 0);
     }
     adds(&t, "</D:multistatus>");
     int rc = respond(c, r, 207, "Multi-Status", "Content-Type: application/xml; charset=utf-8\r\n", t.s, t.len);
@@ -514,7 +553,8 @@ static int remove_path(const char *local) {
 static int do_delete(Conn *c, Request *r) {
     if (body_discard(c, r) != 0) return -1;
     char local[PATH_MAX];
-    if (strcmp(r->path, "/") == 0 || local_path(r->path, local, sizeof local) != 0) return respond_empty(c, r, 403, "Forbidden");
+    if (strcmp(r->path, "/") == 0 || strcmp(r->path, "/External") == 0 || local_path(r->path, local, sizeof local) != 0)
+        return respond_empty(c, r, 403, "Forbidden");
     if (remove_path(local) != 0) return errno == ENOENT ? respond_empty(c, r, 404, "Not Found") : respond_empty(c, r, 403, "Forbidden");
     return respond_empty(c, r, 204, "No Content");
 }
@@ -533,7 +573,8 @@ static int do_move_copy(Conn *c, Request *r, int move) {
     if (body_discard(c, r) != 0) return -1;
     char from[PATH_MAX], to[PATH_MAX];
     struct stat st;
-    if (!r->destination[0] || strcmp(r->path, "/") == 0 || local_path(r->path, from, sizeof from) != 0 ||
+    if (!r->destination[0] || strcmp(r->path, "/") == 0 || strcmp(r->path, "/External") == 0 ||
+        strcmp(r->destination, "/External") == 0 || local_path(r->path, from, sizeof from) != 0 ||
         local_path(r->destination, to, sizeof to) != 0)
         return respond_empty(c, r, 400, "Bad Request");
     if (stat(from, &st) != 0) return respond_empty(c, r, 404, "Not Found");
@@ -541,6 +582,10 @@ static int do_move_copy(Conn *c, Request *r, int move) {
     if (existed && !r->overwrite) return respond_empty(c, r, 412, "Precondition Failed");
     if (existed && strcmp(from, to) != 0 && remove_path(to) != 0) return respond_empty(c, r, 403, "Forbidden");
     int rc = move ? rename(from, to) : copyfile(from, to, NULL, COPYFILE_ALL | COPYFILE_RECURSIVE);
+    if (move && rc != 0 && errno == EXDEV) {
+        rc = copyfile(from, to, NULL, COPYFILE_ALL | COPYFILE_RECURSIVE);
+        if (rc == 0) rc = remove_path(from);
+    }
     if (rc != 0) return errno == ENOENT ? respond_empty(c, r, 409, "Conflict") : respond_empty(c, r, 403, "Forbidden");
     return existed ? respond_empty(c, r, 204, "No Content") : respond_empty(c, r, 201, "Created");
 }
@@ -596,7 +641,6 @@ static const char install_script[] =
     "<key>ProgramArguments</key><array><string>$D/henge-agent</string></array>\n"
     "<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>\n"
     "<key>LimitLoadToSessionType</key><string>Aqua</string>\n"
-    "<key>ProcessType</key><string>Background</string>\n"
     "</dict></plist>\n"
     "EOF\n"
     "launchctl bootstrap \"gui/$(id -u)\" \"$P\"\n"
@@ -719,6 +763,15 @@ static int serve_henge(Conn *c, Request *r) {
         return respond(c, r, 200, "OK", "Content-Type: text/plain\r\n", s, strlen(s));
     }
     if (!strcmp(what, "agent") && !strcmp(r->method, "GET")) return serve_agent(c, r);
+    if (!strcmp(what, "status") && !strcmp(r->method, "GET")) {
+        if (body_discard(c, r) != 0) return -1;
+        char snap[1024];
+        pthread_mutex_lock(&clip_mu);
+        snprintf(snap, sizeof snap, "%s", host_status);
+        agent_seen = time(NULL);
+        pthread_mutex_unlock(&clip_mu);
+        return respond(c, r, 200, "OK", "Content-Type: application/json\r\n", snap, strlen(snap));
+    }
     if (!strcmp(what, "clipboard") && !strcmp(r->method, "GET")) return clipboard_get(c, r);
     if (!strcmp(what, "clipboard") && !strcmp(r->method, "PUT")) return clipboard_put(c, r);
     if (body_discard(c, r) != 0) return -1;
