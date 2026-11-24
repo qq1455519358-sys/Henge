@@ -7,15 +7,20 @@
 #include "usb_camera.h"
 
 /* An xHCI USB host controller (xHCI 1.0, one interrupter, 32-byte contexts,
-   INTx), a boot keyboard on port 1, a Magic Trackpad 2 on port 2, and a
-   UVC bulk camera on port 3: what Virtualization.framework gives a macOS guest as
-   its "Virtual USB Keyboard", plus Apple's multitouch pad, so the guest's
-   own gesture engine sees a real trackpad. Changes come from the host UI on
-   any thread (hv_xhci_key, hv_xhci_touch); the CPU thread delivers them
-   (hv_xhci_poll). */
-#define HV_XHCI_SLOTS 8
-#define HV_XHCI_PORTS 3
-#define HV_XHCI_DEVICES 3
+   INTx) with dedicated root-hub ports:
+     Port 1 (dev 0): Apple USB HID boot keyboard
+     Port 2 (dev 1): Apple Magic Trackpad 2 multitouch
+     Port 3 (dev 2): UVC bulk Front/Back camera
+     Port 4 (dev 3): 5-button wheel USB mouse */
+enum {
+    HV_XDEV_KBD = 0,
+    HV_XDEV_TP = 1,
+    HV_XDEV_CAMERA = 2,
+    HV_XDEV_MOUSE = 3,
+};
+#define HV_XHCI_SLOTS 12
+#define HV_XHCI_PORTS 4
+#define HV_XHCI_DEVICES 4
 #define HV_XHCI_INTRS 4
 #define HV_XHCI_EPS 32 /* device context index 1..31 */
 #define HV_XHCI_REPORTS 256
@@ -27,6 +32,9 @@
 #define HV_TP_FINGERS 10
 #define HV_TP_REPORTS 64
 #define HV_TP_REPORT_LEN (12 + 9 * HV_TP_FINGERS) /* report ID 2: 12-byte prefix, N x 9-byte fingers */
+/* The mouse's report: buttons 1-5, X and Y (16 bits each, relative), wheel, horizontal pan. */
+#define HV_MS_REPORT_LEN 7
+#define HV_MS_REPORTS 128
 
 typedef struct HvXhciRing {
     uint64_t dequeue; /* guest PA of the next TRB */
@@ -53,7 +61,7 @@ typedef struct HvXhci {
     /* device slots: -1 until the device on the slot's port is addressed */
     int slot_used[HV_XHCI_SLOTS + 1];
     struct HvXhciSlot {
-        int dev;         /* 0 keyboard, 1 trackpad, 2 UVC camera, -1 none */
+        int dev;         /* HV_XDEV_*, or -1 none */
         uint64_t camera_generation;
         int configured;
         HvXhciRing ep[HV_XHCI_EPS];
@@ -91,6 +99,11 @@ typedef struct HvXhci {
     uint32_t tp_multi_logs; /* multi-finger deliveries logged, capped */
     uint8_t tp_f1[8];   /* feature report 1: the header for the selected sensor register */
     int tp_f1_len;
+    /* The mouse on port 3: its reports, oldest first, and the buttons held now. */
+    uint8_t ms_reports[HV_MS_REPORTS][HV_MS_REPORT_LEN];
+    uint32_t ms_rhead, ms_rtail;
+    uint8_t ms_buttons;
+    int ms_unplugged; /* HV_USB_MOUSE=0: nothing on port 3 */
 } HvXhci;
 
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus);
@@ -111,6 +124,13 @@ void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py, uint32_t ts_ms)
 void hv_xhci_touch_frame(HvXhci *x, uint32_t ts_ms);
 /* Any thread: the pad's full press (a click), down or up. */
 void hv_xhci_touch_button(HvXhci *x, int down);
+/* Any thread: the mouse moved, scrolled or both. wheel is positive away from the user, pan
+   positive to the right, both in detents. Moves are merged while the guest hasn't taken them. */
+void hv_xhci_mouse(HvXhci *x, int dx, int dy, int wheel, int pan);
+/* Any thread: the mouse's buttons, bit 0 primary, 1 secondary, 2 middle, 3 back, 4 forward. */
+void hv_xhci_mouse_buttons(HvXhci *x, unsigned buttons);
+/* Whether the guest has configured the mouse and is reading it: until then its input belongs elsewhere. */
+int hv_xhci_mouse_ready(const HvXhci *x);
 /* CPU thread: hand waiting reports to the guest. */
 void hv_xhci_poll(HvXhci *x);
 /* CPU stopped: rebase host deadlines and discard pre-pause camera images. */
