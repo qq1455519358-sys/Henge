@@ -5,6 +5,10 @@
 
 #include "cpu.h"
 
+#define HV_MIDR    0x611f0220ull
+#define HV_CTR_EL0 0x9444c004ull
+#define HV_CNTFRQ  24000000ull
+
 /* MRS, MSR (register and immediate), and SYS (DC, IC, TLBI, AT).
    Each returns 1 if the block must leave. */
 int hv_sysreg_mrs(HvCpu *cpu, uint32_t insn, uint64_t pc);
@@ -21,6 +25,7 @@ void hv_tlbi_apply(HvCpu *cpu, uint32_t op1, uint32_t crn, uint32_t crm, uint32_
    natively unless HV_CPU_FEATURES=m1, with HV_MIDR=m4 for M4's identity. Run before each machine starts,
    as the environment can change between starts. */
 void hv_sysreg_configure(void);
+uint64_t hv_sysreg_midr(void);
 
 /* The same choice as text ("midr 0x611f0220 bf16 i8mm"), worked out from the environment and host now,
    for what a saved machine must match before it is resumed. */

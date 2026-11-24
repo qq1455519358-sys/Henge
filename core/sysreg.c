@@ -22,11 +22,11 @@
 #define ID_AA64MMFR0 0x0000000000100025ull /* 48-bit PA, 16-bit ASID, 4K/16K/64K granules */
 #define ID_AA64MMFR1 0x0000000000111000ull /* HPDS, LOR, PAN */
 #define ID_AA64DFR0  0x0000000000000006ull /* Armv8 debug, no PMU */
-#define MIDR         0x611f0220ull         /* Apple M1 (T8103 "Tonga"), its efficiency-core part 0x022 */
+#define MIDR         HV_MIDR               /* Apple M1 (T8103 "Tonga"), its efficiency-core part 0x022 */
 #define MIDR_M4      0x611f0520ull         /* Apple M4 (T8132 "Donan"), the same core type, part 0x052 (XNU proc_reg.h) */
-#define CTR_EL0      0x9444c004ull         /* 64-byte lines, PIPT I-cache, IDC */
+#define CTR_EL0      HV_CTR_EL0            /* 64-byte lines, PIPT I-cache, IDC */
 #define CLIDR        0x0a200023ull         /* L1 split, L2 unified */
-#define CNTFRQ       24000000ull
+#define CNTFRQ       HV_CNTFRQ
 
 /* ID_AA64ISAR1 fields beyond the baseline that a host may run natively. Both are plain SIMD/FP data
    processing (no memory, no system state), so the translator copies them as it copies any vector
@@ -75,6 +75,10 @@ void hv_sysreg_configure(void) {
         fprintf(stderr, "hengevm: HV_MIDR=%s is neither m4 nor an Apple MIDR (0x61......): keeping M1's\n",
                 getenv("HV_MIDR"));
     fprintf(stderr, "hengevm: cpu %s\n", hv_sysreg_signature());
+}
+
+uint64_t hv_sysreg_midr(void) {
+    return guest_midr;
 }
 
 const char *hv_sysreg_signature(void) {
@@ -312,7 +316,8 @@ static int write_reg(HvCpu *cpu, uint32_t reg, uint64_t v) {
     }
     /* Timer outputs follow their registers at once, as in hardware: a masked
        timer must drop its line before the handler's EOI. */
-    if (m->tick) m->tick(m, cpu);
+    if (m->timer_tick) cpu->timer_due = m->timer_tick(m, cpu);
+    else if (m->tick) cpu->timer_due = m->tick(m, cpu);
     return 0;
 other:
     /* PAuth key registers (CRn 2, CRm 1..3): kept, never used, since signing is a no-op. */

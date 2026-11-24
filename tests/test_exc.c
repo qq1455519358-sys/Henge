@@ -1,4 +1,6 @@
 #include "harness.h"
+#include "dispatch.h"
+#include "translate.h"
 
 #include <mach/mach_time.h>
 #include <stdlib.h>
@@ -13,6 +15,8 @@ DECLARE_PROGRAM(p_dabt);
 DECLARE_PROGRAM(p_el0);
 DECLARE_PROGRAM(p_sysregs);
 DECLARE_PROGRAM(p_idregs);
+DECLARE_PROGRAM(p_sysreg_fast);
+DECLARE_PROGRAM(p_sysreg_el0);
 DECLARE_PROGRAM(p_irq);
 DECLARE_PROGRAM(p_fptrap);
 DECLARE_PROGRAM(p_psci);
@@ -138,6 +142,7 @@ int main(void) {
     unsetenv("HV_MIDR");
     unsetenv("HV_CPU_FEATURES");
     hv_sysreg_configure();
+    hv_flush_blocks(&m);
     if (!run(&ids, &c, 0)) {
         check("idregs", "M1's MIDR by default", c.x[1], 0x611f0220);
         check("idregs", "BF16 offered as the host runs it", (c.x[2] >> 44) & 0xf, host_runs("hw.optional.arm.FEAT_BF16"));
@@ -147,21 +152,66 @@ int main(void) {
     setenv("HV_MIDR", "m4", 1);
     setenv("HV_CPU_FEATURES", "m1", 1);
     hv_sysreg_configure();
+    hv_flush_blocks(&m);
     if (!run(&ids, &c, 0)) {
         check("idregs", "HV_MIDR=m4: M4's MIDR", c.x[1], 0x611f0520);
         check("idregs", "HV_CPU_FEATURES=m1: the baseline exactly", c.x[2], baseline);
     }
     setenv("HV_MIDR", "0x411fd070", 1); /* an Arm Cortex-A57: not Apple's, so refused */
     hv_sysreg_configure();
+    hv_flush_blocks(&m);
     if (!run(&ids, &c, 0)) check("idregs", "a non-Apple HV_MIDR keeps M1's", c.x[1], 0x611f0220);
     check("idregs", "the signature names the choice", !strcmp(hv_sysreg_signature(), "midr 0x611f0220"), 1);
     unsetenv("HV_MIDR");
     unsetenv("HV_CPU_FEATURES");
     hv_sysreg_configure();
+    hv_flush_blocks(&m);
 
     mach_timebase_info_data_t tb;
     mach_timebase_info(&tb);
     check("host", "mach_absolute_time is 24 MHz (timebase 125/3)", (uint64_t)tb.numer * 1000 + tb.denom, 125003);
+
+    static const TestProgram sf = TEST_PROGRAM(p_sysreg_fast);
+    m.stats_interval = 1000000;
+    uint64_t mrs0 = m.stats.helper[HV_OP_MRS], msr0 = m.stats.helper[HV_OP_MSR];
+    uint64_t f2 = m.stats.flush_why[2], f3 = m.stats.flush_why[3];
+    if (!run(&sf, &c, 0)) {
+        m.stats_interval = 0;
+        check("sysreg_fast", "UAO #1", c.x[1], 1u << 23);
+        check("sysreg_fast", "UAO #0", c.x[2], 0);
+        check("sysreg_fast", "UAO reg", c.x[3], 1u << 23);
+        check("sysreg_fast", "CONTEXTIDR_EL1", c.x[4], 0x1234);
+        check("sysreg_fast", "ACTLR_EL1", c.x[5], 0x5678);
+        check("sysreg_fast", "AMAIR_EL1", c.x[6], 0x9abc);
+        check("sysreg_fast", "MDSCR_EL1", c.x[7], 0xdef0);
+        check("sysreg_fast", "VBAR_EL1 mask", c.x[9], c.x[8]);
+        check("sysreg_fast", "CNTKCTL_EL1", c.x[10], 3);
+        check("sysreg_fast", "el0_cnt mirrored", c.el0_cnt, 3);
+        check("sysreg_fast", "DCZID_EL0", c.x[11], 4);
+        check("sysreg_fast", "OSLSR_EL1", c.x[12], 8);
+        check("sysreg_fast", "PAuth key read", c.x[13], 0);
+        check("sysreg_fast", "PMU read", c.x[14], 0);
+        check("sysreg_fast", "impdef read", c.x[15], 0);
+        check("sysreg_fast", "SCTLR PAC inline bits", c.x[18], (c.x[17] | (1ull << 31) | 0x180) & ~0x20ull);
+        check("sysreg_fast", "NZCV preserved", c.x[19], 0xa0000000);
+        check("sysreg_fast", "SCTLR WXN slow", c.x[20], c.x[18] | (1ull << 19));
+        check("sysreg_fast", "TTBR1 changed slow", c.x[21], c.x[16] ^ 0x1000);
+        check("sysreg_fast", "0 MRS traps", m.stats.helper[HV_OP_MRS] - mrs0, 0);
+        check("sysreg_fast", "only 2 slow MSR traps (WXN + TTBR1)", m.stats.helper[HV_OP_MSR] - msr0, 2);
+        check("sysreg_fast", "SCTLR WXN TLB flush", m.stats.flush_why[2] - f2, 1);
+        check("sysreg_fast", "TTBR1 changed TLB flush", m.stats.flush_why[3] - f3, 1);
+    }
+    m.stats_interval = 0;
+
+    static const TestProgram se = TEST_PROGRAM(p_sysreg_el0);
+    if (!run(&se, &c, 0)) {
+        check("sysreg_el0", "CNTFRQ EL1", c.x[0], 24000000);
+        check("sysreg_el0", "DCZID EL0", c.x[1], 4);
+        check("sysreg_el0", "CNTFRQ EL0", c.x[2], 24000000);
+        check("sysreg_el0", "2 UNDEF traps (PAuth+UAO)", c.x[24], 2);
+        check("sysreg_el0", "last ESR UNDEF", c.x[20], 0x02000000);
+        check("sysreg_el0", "vector lower EL", c.x[25], 0x400);
+    }
 
     static const TestProgram irq = TEST_PROGRAM(p_irq);
     m.percpu[0].irq_line = 1;
