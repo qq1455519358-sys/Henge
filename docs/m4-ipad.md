@@ -1,67 +1,34 @@
-# Henge on an M4 iPad Pro
+# Henge on an M4 iPad Pro (0.4.0 Supercharged Build)
 
-What this branch changes, and the settings that suit an M4 iPad Pro.
+What this branch (`m4-ipad`) adds on top of `Leviidev/Henge`, tuned specifically for a 13" M4 iPad Pro (`iPad16,5`, 1–2 TB / 16 GB RAM, 4 P-cores + 6 E-cores, iPadOS 27).
 
-## The CPU the Mac is told it has
+## Integrated Engine & Platform Upgrades
 
-Henge's virtual CPU has been an M1: its identity (MIDR) and its features (ID registers) are M1's, because
-every device Henge supports, A14 and M1 included, has those features, and the translator copies most
-instructions as they are, so the host chip runs them.
+1. **16 GB Guest RAM Address-Space Fix (`PR #121` / `PR #211`)**
+   - Releases the 60 GB high virtual-address reservation (`henge_ios_hold_high`) before sizing or booting a virtual Mac, expanding contiguous guest RAM mapping from ~2.5 GB to ~16.9 GB so 16 GB iPads can allocate **8–10 GB guest RAM** outside the app footprint.
+2. **8-Segment JIT Code-Cache Ring & Inlined Hot Sysregs (`PR #186`)**
+   - Splits the JIT region into an 8-segment ring (`HV_JIT_SEGMENTS=8`) with O(segment) eviction and a single-barrier `icache` clean (eliminating full-cache flushes every 60–90 s and 540 ms `ic ivau` storms), plus zero-trap inlined EL1/EL0 system registers (`SCTLR`, `TTBR1`, `MIDR`, `CNTKCTL`, `UAO`, etc.) and `tr_mu` yield spin.
+3. **Cross-vCPU TLB Stall Reduction & iPad GPU Pacing (`PR #218` + `Issue #164`)**
+   - Enables `HV_SYNC_WAIT=1`, `HV_RANGE_DROP=256`, and `ijc_va`-aware remote drops by default (cutting cross-CPU TLB acknowledgement waits from up to 76% of a core down to 4–9%), alongside `HV_GROUPS=1` (+11% measured FPS on iPad) and `HV_PVG_VBLANK=1` (cutting display freezes under load from 5/6 to 1/6).
+4. **Hardware-MMU Direct User Memory ("NCE") & Shared-Cache TLB Retention (`PR #157`)**
+   - Includes `HV_SHARED_KEEP=1` (retains verified shared `dyld` L2 mappings across process switches, where 95.5% of user TLB refills occur) and `HV_EL0_WINDOW=33` (`core/window.c`: maps 8 GB per vCPU of guest EL0 userland straight onto the M4 hardware MMU via `vm_remap`), exposed as one-tap switches in **Settings › Performance**.
+5. **Background Keep-Alive & Dynamic Balloon Relief (`PR #214`)**
+   - Silent mixed audio keeps iPadOS from suspending and jetsam-killing Henge when switching apps or locking the screen (`KeepAlive.swift`), paired with automatic `virtio-balloon` memory relief under iOS memory pressure.
+6. **Native-Speed Mac Apps Without macOS (`tl/` + `PR #219`)**
+   - Enabled on the Home screen (`Mac Apps…`) by default: runs arm64 Mac command-line programs sequentially with arguments, working folder, `env.txt`, and `stdin` directly on the M4 hardware MMU at native speed, plus experimental windowed AppKit/Qt/SDL apps.
+7. **M4 CPU Features (`BF16` & `I8MM`) and Host Identity**
+   - Offers `FEAT_BF16` and `FEAT_I8MM` vector instructions natively when supported by the host chip (`HV_CPU_FEATURES=m1` disables; `HV_MIDR=m4` reports Apple M4 MIDR `0x611f0520`).
 
-- **BF16 and I8MM, when the chip runs them.** A15, M2 and later run two more sets of vector instructions:
-  BF16 (bfloat16 dot products and matrix multiplies, BFCVT) and I8MM (8-bit integer matrix multiplies, USDOT).
-  They are plain data processing, so the translator copies them like any other vector instruction. The Mac is
-  now offered them when the device's own CPU reports them (`hw.optional.arm.FEAT_BF16`, `FEAT_I8MM`), so on an
-  M4 iPad macOS's math libraries can use them. On an A14 or M1 device nothing changes.
-  `HV_CPU_FEATURES=m1` keeps M1's features exactly, for a Mac that must also start on such a device.
-- **M4's identity, if you ask for it.** `HV_MIDR=m4` tells macOS its CPU is an Apple M4 (MIDR `0x611f0520`,
-  part `0x052` of T8132 "Donan" in XNU's `proc_reg.h`), so About This Mac reads M4. It is experimental: the
-  features stay those above (no SME), and macOS may pick code for a chip by its name alone. Remove the line if
-  macOS misbehaves. Any other Apple MIDR (`0x61......`) is accepted as a value; anything else keeps M1's.
-- **A saved Mac keeps its CPU.** Instant Resume's identity now includes the CPU (`midr ... bf16 i8mm`), so a Mac
-  saved with BF16 offered starts afresh, rather than waking, where it would not be.
+## Recommended Settings for 13" M4 iPad Pro (1–2 TB, 16 GB)
 
-Both settings are read from `henge-env.txt` (Files › Henge, one `KEY=VALUE` a line) before each Mac starts,
-and the log shows the choice: `hengevm: cpu midr 0x611f0220 bf16 i8mm`. Inside the Mac:
-
-```bash
-sysctl hw.optional.arm.FEAT_BF16 hw.optional.arm.FEAT_I8MM machdep.cpu.brand_string
-```
-
-## CPUs: the performance cores
-
-A new Mac now gets as many CPUs as the device has performance cores (`hw.perflevel0.physicalcpu`, 2 to 6):
-4 on a 1 or 2 TB M4 iPad Pro, 3 on a 256 or 512 GB one. iOS keeps the Mac's CPU threads on those cores;
-past them, some run on efficiency cores and hold up the rest each time the Mac's CPUs wait for one another.
-An existing CPU setting is kept: lower it on the Home screen if it is above that number.
-
-## Disk size
-
-A new Mac's disk can be 64, 128, 256 or 512 GB (Install › New Mac › Disk); it was always 64 GB before. The disk
-is a sparse file, so the device's storage goes only to what macOS writes, and the note under the choice warns
-when a size comes near the free space. A Mac that exists keeps its size.
-
-## Tested
-
-13" iPad Pro M4, 1 TB (iPad16,5: 4 performance + 6 efficiency cores, 16 GB), iPadOS 27.0 beta (24A5430a),
-macOS 27.2, on 0.3 with the same ID-register change ("Henge M4 test", 2026-11-14):
-
-- a fresh macOS 27.2 install, first boot and setup: no panics;
-- a Mac installed before, started cold: `FEAT_BF16: 1`, `FEAT_I8MM: 1`, `Apple M1 (Virtual)`; BFDOT, BFMMLA,
-  BFMLALB/T, BFCVT, SMMLA, UMMLA, USMMLA and USDOT all give exact results (9 checks); SMMLA takes 1.61 ns per
-  2×8×2 block against 21.43 ns in plain C; no crash reports since boot.
-
-## Settings for an M4 iPad Pro
-
-| Setting | Where | M4 iPad Pro |
-|---|---|---|
-| CPUs | Home | 4 (1 or 2 TB), 3 (256 or 512 GB) |
-| Memory | Install, Mac settings | 8 GB on a 16 GB iPad (1 or 2 TB), 6 GB at most on an 8 GB one |
-| Code cache | Settings › Performance | 1.5 GB |
-| Screen | Mac settings | Performance (Retina costs a lot of emulated GPU work) |
-| Refresh | Settings › Performance | 60 Hz, or 30 Hz in a session's Details |
-| Lighter macOS | a session's Details | on |
-| macOS | Install | Sequoia 15.6.1 runs best; macOS 27 is the slowest |
-
-`HV_QOS=ui` in `henge-env.txt` runs the Mac's CPUs at the highest iOS priority (testing): try it, and remove
-it if the screen stutters.
+| Setting | Where | Recommended Value | Why |
+|---|---|---|---|
+| **macOS Version** | Install | **Sequoia 15.6.1** | Fastest desktop & Safari; avoid macOS 27's heavy shader/daemon overhead |
+| **CPUs** | Home / Mac settings | **3** (default on 4-P-core M4) | Leaves 1 dedicated M4 P-core for Metal GPU replay & UIKit so vCPUs never spill onto E-cores |
+| **Memory** | Install / Mac settings | **10 GB** (default on 16 GB iPad; **3 GB** on 8 GB iPad) | Zero guest swap while leaving >5 GB for iPadOS + 2 GB JIT cache |
+| **Code cache** | Settings › Performance | **2 GB** (default on 16 GB iPad) | Holds ~7M translated blocks across 8 ring segments |
+| **High-priority vCPUs** | Settings › Performance | **On** (`HV_QOS=ui`) | Prevents XNU battery coalition demotion to efficiency cores |
+| **Grouped memory accesses** | Settings › Performance | **On** (`HV_GROUPS=1`) | +11% sustained FPS on iPad |
+| **Screen** | Mac settings | **Performance** (`1600×1200`) or **Fit** (`1920×1440`) at **60 Hz** | Keeps emulated GPU load low while filling the 4:3 iPad screen |
+| **Lighter macOS** | Session › Details | **On** | Disables background indexing and motion overhead inside macOS |
+| **Keep shared dyld TLB / Direct user memory (NCE)** | Settings › Performance | **Try On** after Setup Assistant completes | Experimental hardware-MMU / shared-cache acceleration (`PR #157`) |

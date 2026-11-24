@@ -15,11 +15,14 @@ struct SettingsView: View {
     @AppStorage(EngineTuning.wfiSpinKey) private var wfiSpin = false
     @AppStorage(EngineTuning.superblocksKey) private var superblocks = false
     @AppStorage(EngineTuning.groupsKey) private var groups = true
+    @AppStorage(EngineTuning.qosUIKey) private var qosUI = EngineTuning.defaultQosUI
+    @AppStorage(EngineTuning.sharedKeepKey) private var sharedKeep = false
+    @AppStorage(EngineTuning.el0WindowKey) private var el0Window = false
     @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
     @AppStorage(DeskAppearance.key) private var appearance = DeskAppearance.system
     @AppStorage(InstantResume.key) private var instantResume = false
     @AppStorage(KeepAlive.key) private var keepAlive = true
-    @AppStorage(MacAppsFeature.key) private var macApps = false
+    @AppStorage(MacAppsFeature.key) private var macApps = true
 
     /// The second footer paragraph: how you click, given the selected input mode.
     private var inputDescription: String {
@@ -113,17 +116,21 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     Toggle("Faster disk writes", isOn: $fastFlush)
+                    Toggle("High-priority vCPUs (P-core preference)", isOn: $qosUI)
                     Toggle("Quicker wake from idle", isOn: $wfiSpin)
                     Toggle("Grouped memory accesses", isOn: $groups)
                     Toggle("Superblocks (experimental)", isOn: $superblocks)
+                    Toggle("Keep shared dyld TLB (experimental)", isOn: $sharedKeep)
+                    Toggle("Direct user memory / NCE (experimental)", isOn: $el0Window)
                     Picker("Code cache", selection: $codeCacheMB) {
                         Text("512 MB").tag(512)
                         Text("1 GB").tag(1024)
                         Text("1.5 GB").tag(1536)
+                        Text("2 GB").tag(2048)
                     }
-                    Text("A bigger code cache empties less often and takes more memory (about 1.75 times its size); Henge picks one by its memory limit: 1.5 GB where there is plenty, 512 MB where there is little. Applies the next time Henge opens. If JIT stops turning on, or a Mac closes Henge during setup, choose a smaller one.")
+                    Text("A bigger code cache empties less often and takes more memory (about 1.75 times its size); Henge picks 2 GB on 16 GB iPads, 1.5 GB where there is plenty, 512 MB where there is little. Applies the next time Henge opens. If JIT stops turning on, or a Mac closes Henge during setup, choose a smaller one.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Text("macOS draws a frame for every refresh: 30 Hz leaves the most of the emulated CPU to apps, at the cost of choppier animation; 60 Hz is smoother. Faster disk writes order them without waiting for a full sync; a sudden power loss could lose the last ones. Quicker wake keeps an idle CPU watching for work for 50 µs, at some battery cost. Grouped memory accesses check a page once for several accesses next to each other, at the cost of a little more code. Superblocks let translated code run past conditional branches. Changes apply the next time a Mac starts.")
+                    Text("macOS draws a frame for every refresh: 30 Hz leaves the most of the emulated CPU to apps, at the cost of choppier animation; 60 Hz is smoother. High-priority vCPUs keeps guest threads on performance cores (HV_QOS=ui). Grouped memory accesses check a page once for neighbouring accesses. Keep shared dyld TLB retains verified shared-cache mappings across process switches (HV_SHARED_KEEP=1), and Direct user memory maps 8 GB per CPU straight onto the hardware MMU via vm_remap (HV_EL0_WINDOW=33; requires Extended Virtual Addressing). Changes apply the next time a Mac starts.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .listRowBackground(Desk.card)
@@ -141,7 +148,7 @@ struct SettingsView: View {
                 .listRowBackground(Desk.card)
                 Section("Mac Apps") {
                     Toggle("Mac apps without macOS", isOn: $macApps)
-                    Text("Bring in a .dmg or an .app (the + button on Home) and run it inside Henge through its own translation layer, without starting a Mac. Programs without windows run today; apps with windows don't yet. Experimental.")
+                    Text("Bring in a .dmg or an .app (Mac Apps… on Home) and run arm64 Mac programs directly on this \(Device.name)'s hardware MMU through Henge's translation layer, without starting a virtual Mac. Command-line tools run one after another with arguments and stdin; supported AppKit/Qt/SDL apps open windows directly. Experimental.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 .listRowBackground(Desk.card)

@@ -37,19 +37,20 @@ enum Device {
     /// How much memory to suggest for a new Mac: what leaves this device room for iOS.
     static var suggestedRAMGB: Int {
         let mb = ProcessInfo.processInfo.physicalMemory >> 20
-        // m4 fork: an 8 GB iPad (7.4 GB usable) thrashes and kills the Mac at 6 GB: 16 GB devices only.
-        // A 6 GB device (5.7 GB usable) could not build a 4 GB Mac, and installed a 3 GB one (#70); 4 GB devices, 2.
-        return mb >= 14_000 ? 8 : mb >= 10_000 ? 6 : mb >= 7_000 ? 4 : mb >= 5_000 ? 3 : 2
+        // m4 fork: 16 GB iPads (1-2 TB M4, ~15.1 GB usable) easily fit a 10 GB Mac once PR #121 frees the 60 GB VA hold;
+        // 8 GB iPads (~7.4 GB usable) cap at 3 GB alongside the code cache (Machines.swift / PR #214).
+        return mb >= 14_000 ? 10 : mb >= 10_000 ? 6 : mb >= 7_000 ? 3 : 2
     }
 
-    /// How many CPUs to suggest for a Mac: this chip's performance cores (hw.perflevel0), where iOS keeps the Mac's
-    /// CPU threads at Henge's QoS. Past them, some land on efficiency cores and hold up the rest each time the guest's
-    /// CPUs wait for one another. An M4 iPad Pro has 4 (1-2 TB) or 3 (256-512 GB); 4 where iOS doesn't say.
+    /// How many CPUs to suggest for a Mac: leave one performance core free for Metal GPU replay and UIKit when the
+    /// chip has 4+ P-cores (3 guest vCPUs on a 4-P-core 1-2 TB M4 iPad Pro), preventing XNU from spilling vCPUs onto
+    /// narrow E-cores and stalling cross-CPU TLB shootdowns (henge_cpu.ips).
     static let suggestedCPUs: Int = {
         var cores: Int32 = 0
         var size = MemoryLayout<Int32>.size
-        guard sysctlbyname("hw.perflevel0.physicalcpu", &cores, &size, nil, 0) == 0, cores > 0 else { return 4 }
-        return min(max(Int(cores), 2), 6)
+        guard sysctlbyname("hw.perflevel0.physicalcpu", &cores, &size, nil, 0) == 0, cores > 0 else { return 3 }
+        let p = Int(cores)
+        return p >= 4 ? min(p - 1, 6) : max(p, 2)
     }()
 
     /// The choices for a Mac's memory, in GB.

@@ -70,11 +70,13 @@ enum JITBootstrap {
     /// device has more than 8 GB.
     static let defaultCodeCacheMB: Int = {
         let limit = Entitlements.memoryLimitAtLaunch, physical = ProcessInfo.processInfo.physicalMemory
+        if limit >= 6_500 << 20 && physical > 14 << 30 { return 2048 }
         if limit >= 5_500 << 20 { return physical > 9 << 30 ? 1536 : 1024 }
         return limit >= 3_500 << 20 ? 1024 : 512
     }()
     static let jitBytes: Int = {
         switch (UserDefaults.standard.object(forKey: codeCacheKey) as? Int) ?? defaultCodeCacheMB {
+        case 2048: return 2048 << 20
         case 1536: return 1536 << 20
         case 512: return 512 << 20
         default: return 1024 << 20

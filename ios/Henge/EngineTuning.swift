@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// Engine settings, without a rebuild. Defaults below, then the Performance settings,
 /// then Documents/henge-env.txt (KEY=VALUE per line, # comments; {Documents} in a value is that folder) overrides them all.
@@ -9,6 +10,10 @@ enum EngineTuning {
     static let wfiSpinKey = "henge.perf.wfiSpin"
     static let fastFlushKey = "henge.perf.fastFlush"
     static let groupsKey = "henge.perf.groups"
+    static let qosUIKey = "henge.perf.qosUI"
+    static let sharedKeepKey = "henge.perf.sharedKeep"
+    static let el0WindowKey = "henge.perf.el0Window"
+    static let defaultQosUI = UIDevice.current.userInterfaceIdiom == .pad
 
     static let defaults: [String: String] = [
         // 60, not 120: every frame macOS draws is emulated and replayed, so 120 Hz
@@ -31,6 +36,10 @@ enum EngineTuning {
         if [30, 120].contains(d.integer(forKey: refreshKey)) { env["HV_HZ"] = String(d.integer(forKey: refreshKey)) }
         if d.bool(forKey: superblocksKey) { env["HV_SUPERBLOCKS"] = "1" } else { unsetenv("HV_SUPERBLOCKS") }
         if d.object(forKey: groupsKey) as? Bool == false { env["HV_GROUPS"] = "0" }
+        let qosUI = (d.object(forKey: qosUIKey) as? Bool) ?? defaultQosUI
+        if qosUI { env["HV_QOS"] = "ui" } else { unsetenv("HV_QOS") }
+        if d.bool(forKey: sharedKeepKey) { env["HV_SHARED_KEEP"] = "1" } else { unsetenv("HV_SHARED_KEEP") }
+        if d.bool(forKey: el0WindowKey) { env["HV_EL0_WINDOW"] = "33" } else { unsetenv("HV_EL0_WINDOW") }
         if d.bool(forKey: wfiSpinKey) { env["HV_WFI_SPIN"] = "50" }
         if d.object(forKey: fastFlushKey) as? Bool == false { env["HV_FLUSH"] = "0" }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]

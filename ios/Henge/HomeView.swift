@@ -12,7 +12,7 @@ struct HomeView: View {
     @State private var jitReady = JITBootstrap.ready
     @State private var chosen: UUID?
     @State private var showMacApps = false
-    @AppStorage(MacAppsFeature.key) private var macApps = false
+    @AppStorage(MacAppsFeature.key) private var macApps = true
 
     /// The Mac on show: the one picked, or the one used last.
     private var mac: VirtualMac? {
