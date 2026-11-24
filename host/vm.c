@@ -23,6 +23,7 @@
 #include "audio_mac.h"
 #include "dispatch.h"
 #include "dt_fixup.h"
+#include "dtplant.h"
 #include "net_slirp.h"
 #include "sysreg.h"
 
@@ -65,6 +66,319 @@ HvVmapple *hv_vm_board(void) { return &board; }
 HvCpu *hv_vm_cpu(int index) { return index >= 0 && index < ncpus ? &cpus[index] : NULL; }
 int hv_vm_ncpus(void) { return ncpus; }
 
+/* ---- Boot-args & ADT Bluetooth interlocks (PR #84) ---- */
+#define HV_BOOTARGS_CMDLINE_OFF 108
+#define HV_BOOTARGS_CMDLINE_CAP 256
+#define HV_BOOTARGS_DTPTR_OFF 96
+#define HV_BOOTARGS_DTLEN_OFF 104
+
+static _Atomic int bootargs_patch_state;
+static _Atomic int bootargs_patch_claimed;
+static _Atomic int dtplant_state;
+static _Atomic int dtplant_t3_claimed;
+static _Atomic int dtplant_t1_done, dtplant_t2_done;
+static _Atomic int bootargs_arm_valid;
+static _Atomic uint64_t bootargs_arm_found, bootargs_arm_phys, bootargs_arm_top, bootargs_arm_virt;
+static _Atomic int bootargs_arm_range_ok;
+static _Atomic int bootargs_t1_done, bootargs_t2_done;
+static _Atomic int bootargs_poll_stop;
+static pthread_t bootargs_poll_tid;
+static int bootargs_poll_started;
+static double bootargs_t0;
+static pthread_mutex_t bootargs_write_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int hv_bootargs_patch_settled(void) { return atomic_load_explicit(&bootargs_patch_state, memory_order_acquire) != 0; }
+static int hv_dtplant_gate_on(void) {
+    const char *g = getenv("HV_DT_PLANT_INTERNAL");
+    return g && !strcmp(g, "1");
+}
+static int hv_dtplant_settled(void) { return atomic_load_explicit(&dtplant_state, memory_order_acquire) != 0; }
+static int hv_patches_all_settled(void) {
+    if (getenv("HV_BOOTARGS_APPEND") && !hv_bootargs_patch_settled()) return 0;
+    if (hv_dtplant_gate_on() && !hv_dtplant_settled()) return 0;
+    return 1;
+}
+static void hv_bootargs_disarm_hooks_if_settled(void) {
+    if (hv_patches_all_settled()) {
+        m.bootargs_fetch_hook = NULL;
+        m.bootargs_hvc_hook = NULL;
+    }
+}
+static double hv_bootargs_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+static void hv_bootargs_reset_state(void) {
+    atomic_store(&bootargs_patch_state, 0);
+    atomic_store(&bootargs_patch_claimed, 0);
+    atomic_store(&dtplant_state, 0);
+    atomic_store(&dtplant_t3_claimed, 0);
+    atomic_store(&dtplant_t1_done, 0);
+    atomic_store(&dtplant_t2_done, 0);
+    atomic_store(&bootargs_arm_valid, 0);
+    atomic_store(&bootargs_arm_found, 0);
+    atomic_store(&bootargs_arm_phys, 0);
+    atomic_store(&bootargs_arm_top, 0);
+    atomic_store(&bootargs_arm_virt, 0);
+    atomic_store(&bootargs_arm_range_ok, 0);
+    atomic_store(&bootargs_t1_done, 0);
+    atomic_store(&bootargs_t2_done, 0);
+    atomic_store(&bootargs_poll_stop, 0);
+}
+static int hv_bootargs_sig_ok(const uint8_t *ram, uint64_t size, uint64_t off,
+                              uint64_t *virt_out, uint64_t *phys_out, uint64_t *top_out) {
+    if (!ram || off + 0x1000 > size) return 0;
+    const uint64_t *q = (const uint64_t *)(ram + off);
+    const uint16_t *h = (const uint16_t *)(ram + off);
+    if (h[0] < 2 || h[0] > 3 || h[1] < 1 || h[1] > 3) return 0;
+    if (q[1] >> 40 != 0xfffffe || q[2] < VMAPPLE_MEM || q[2] >= VMAPPLE_MEM + size || q[3] == 0 || q[3] > size) return 0;
+    uint64_t base = q[5], row = q[7], w = q[8], hh = q[9], depth = q[10];
+    if (w < 320 || w > 8192 || hh < 200 || hh > 8192 || row < w * 4 || (depth & 0xff) != 32) return 0;
+    if (base < VMAPPLE_MEM || base - VMAPPLE_MEM + row * hh > size) return 0;
+    if (virt_out) *virt_out = q[1];
+    if (phys_out) *phys_out = q[2];
+    if (top_out) *top_out = q[4];
+    return 1;
+}
+static int hv_bootargs_patch_core(uint8_t *ram, uint64_t size, uint64_t found, const char *via, const char **reason) {
+    const char *token = getenv("HV_BOOTARGS_APPEND");
+    if (!token) { *reason = "gate unset"; return 0; }
+    pthread_mutex_lock(&bootargs_write_mu);
+    size_t tlen = strlen(token);
+    int bad = tlen == 0;
+    for (size_t i = 0; i < tlen; i++)
+        if (token[i] <= ' ' || token[i] >= 0x7f) bad = 1;
+    if (bad) { *reason = "invalid token"; goto fail; }
+    if (found + HV_BOOTARGS_CMDLINE_OFF + HV_BOOTARGS_CMDLINE_CAP > size) { *reason = "command line field out of RAM bounds"; goto fail; }
+    uint64_t dtp;
+    uint32_t dtlen;
+    memcpy(&dtp, ram + found + HV_BOOTARGS_DTPTR_OFF, 8);
+    memcpy(&dtlen, ram + found + HV_BOOTARGS_DTLEN_OFF, 4);
+    if (dtlen < 256 || dtlen > (16u << 20)) { *reason = "device tree length implausible"; goto fail; }
+    if (dtp >= VMAPPLE_MEM && dtp < VMAPPLE_MEM + size) {
+        if (dtp - VMAPPLE_MEM + dtlen > size) { *reason = "device tree out of RAM bounds"; goto fail; }
+    } else if (dtp >> 40 != 0xfffffe) { *reason = "device tree pointer implausible"; goto fail; }
+    char *cmd = (char *)(ram + found + HV_BOOTARGS_CMDLINE_OFF);
+    size_t len = 0;
+    while (len < HV_BOOTARGS_CMDLINE_CAP && cmd[len]) {
+        unsigned char ch = (unsigned char)cmd[len];
+        if (ch < ' ' || ch >= 0x7f) { *reason = "command line is not a clean string"; goto fail; }
+        len++;
+    }
+    if (len >= HV_BOOTARGS_CMDLINE_CAP) { *reason = "command line not NUL-terminated within its field"; goto fail; }
+    if (strstr(cmd, token)) { *reason = "token already present"; goto fail; }
+    size_t sep = len ? 1 : 0;
+    if (len + sep + tlen + 1 > HV_BOOTARGS_CMDLINE_CAP) { *reason = "insufficient capacity in command line field"; goto fail; }
+    size_t at = len + sep;
+    if (sep) cmd[len] = ' ';
+    memcpy(cmd + at, token, tlen);
+    cmd[at + tlen] = 0;
+    if (memcmp(cmd + at, token, tlen) != 0 || cmd[at + tlen] != 0) { *reason = "write-back verify failed"; goto fail; }
+    if (via)
+        fprintf(stderr, "bootargs-patch: appended '%s' at cmdline offset %zu (was len %zu, now len %zu) via %s at host-t %.3f\n",
+                token, at, len, at + tlen, via, hv_bootargs_now() - bootargs_t0);
+    else
+        fprintf(stderr, "bootargs-patch: appended '%s' at cmdline offset %zu (was len %zu, now len %zu)\n", token, at, len, at + tlen);
+    pthread_mutex_unlock(&bootargs_write_mu);
+    return 1;
+fail:
+    pthread_mutex_unlock(&bootargs_write_mu);
+    return 0;
+}
+static void hv_bootargs_maybe_patch(uint8_t *ram, uint64_t size, uint64_t found) {
+    if (!getenv("HV_BOOTARGS_APPEND") || hv_bootargs_patch_settled()) return;
+    if (atomic_exchange_explicit(&bootargs_patch_claimed, 1, memory_order_acq_rel)) return;
+    const char *reason = NULL;
+    if (hv_bootargs_patch_core(ram, size, found, NULL, &reason)) {
+        atomic_store_explicit(&bootargs_patch_state, 1, memory_order_release);
+        hv_bootargs_disarm_hooks_if_settled();
+        return;
+    }
+    fprintf(stderr, "bootargs-patch: NOT APPLIED (%s)\n", reason ? reason : "unknown");
+    atomic_store_explicit(&bootargs_patch_state, 2, memory_order_release);
+    hv_bootargs_disarm_hooks_if_settled();
+}
+static int hv_dtplant_attempt(uint64_t found, const char *via, const char **reason) {
+    uint8_t *ram = board.ram;
+    uint64_t size = board.ram_size;
+    if (!ram) { *reason = "guest RAM not mapped"; return 0; }
+    uint64_t virt = 0, phys = 0;
+    if (!hv_bootargs_sig_ok(ram, size, found, &virt, &phys, NULL)) { *reason = "candidate fails the boot_args signature"; return 0; }
+    pthread_mutex_lock(&bootargs_write_mu);
+    uint64_t dtp;
+    uint32_t dtlen;
+    memcpy(&dtp, ram + found + HV_BOOTARGS_DTPTR_OFF, 8);
+    memcpy(&dtlen, ram + found + HV_BOOTARGS_DTLEN_OFF, 4);
+    if (dtlen < 256 || dtlen > (16u << 20)) { *reason = "device tree length implausible"; goto fail; }
+    uint64_t pa;
+    if (dtp >= VMAPPLE_MEM && dtp < VMAPPLE_MEM + size) pa = dtp;
+    else if (dtp >= virt && dtp - virt < size) pa = phys + (dtp - virt);
+    else { *reason = "device tree pointer implausible"; goto fail; }
+    if (pa < VMAPPLE_MEM || pa >= VMAPPLE_MEM + size || pa - VMAPPLE_MEM + dtlen > size) { *reason = "device tree out of RAM bounds"; goto fail; }
+    uint64_t dt_off = pa - VMAPPLE_MEM;
+    uint32_t newlen = 0;
+    dtplant_set_machine_uuid(m.machine_uuid);
+    int r = dtplant_insert(ram + dt_off, dtlen, size - dt_off, &newlen, reason);
+    if (r == 2) {
+        atomic_store_explicit(&dtplant_state, 1, memory_order_release);
+        pthread_mutex_unlock(&bootargs_write_mu);
+        hv_bootargs_disarm_hooks_if_settled();
+        return 1;
+    }
+    if (r != 1) goto fail;
+    uint32_t check = 0;
+    memcpy(ram + found + HV_BOOTARGS_DTLEN_OFF, &newlen, 4);
+    memcpy(&check, ram + found + HV_BOOTARGS_DTLEN_OFF, 4);
+    if (check != newlen) { *reason = "device tree length write-back verify failed"; goto fail; }
+    atomic_store_explicit(&dtplant_state, 1, memory_order_release);
+    fprintf(stderr, "dtplant: inserted bluetoothInternalControllerInfo (14 B) into /options, dt len %u -> %u, via %s at host-t %.3f\n",
+            dtlen, newlen, via, hv_bootargs_now() - bootargs_t0);
+    pthread_mutex_unlock(&bootargs_write_mu);
+    hv_bootargs_disarm_hooks_if_settled();
+    return 1;
+fail:
+    pthread_mutex_unlock(&bootargs_write_mu);
+    return 0;
+}
+static void hv_dtplant_maybe_plant(uint8_t *ram, uint64_t size, uint64_t found) {
+    (void)ram;
+    (void)size;
+    if (!hv_dtplant_gate_on() || hv_dtplant_settled()) return;
+    if (atomic_exchange_explicit(&dtplant_t3_claimed, 1, memory_order_acq_rel)) return;
+    const char *reason = NULL;
+    if (hv_dtplant_attempt(found, "T3", &reason)) return;
+    if (!hv_dtplant_settled())
+        fprintf(stderr, "dtplant: PASS %s via T3 at host-t %.3f\n", reason ? reason : "plant failed", hv_bootargs_now() - bootargs_t0);
+}
+static void hv_bootargs_try_arm(void) {
+    if (atomic_load_explicit(&bootargs_arm_valid, memory_order_acquire)) return;
+    uint8_t *ram = board.ram;
+    uint64_t size = board.ram_size;
+    if (!ram) return;
+    uint64_t limit = size < (1ull << 30) ? size : 1ull << 30;
+    for (uint64_t off = 0; off + 0x1000 <= limit; off += 0x4000) {
+        uint64_t virt, phys, top;
+        if (!hv_bootargs_sig_ok(ram, size, off, &virt, &phys, &top)) continue;
+        atomic_store_explicit(&bootargs_arm_found, off, memory_order_release);
+        atomic_store_explicit(&bootargs_arm_phys, phys, memory_order_release);
+        atomic_store_explicit(&bootargs_arm_top, top, memory_order_release);
+        atomic_store_explicit(&bootargs_arm_virt, virt, memory_order_release);
+        int range_ok = top > phys && top - phys <= size;
+        atomic_store_explicit(&bootargs_arm_range_ok, range_ok, memory_order_release);
+        atomic_store_explicit(&bootargs_arm_valid, 1, memory_order_release);
+        return;
+    }
+}
+static int hv_bootargs_off_from_ptr(uint64_t ptr, uint64_t *off_out) {
+    uint64_t size = board.ram_size;
+    if (!board.ram) return 0;
+    if (ptr >= VMAPPLE_MEM && ptr < VMAPPLE_MEM + size) { *off_out = ptr - VMAPPLE_MEM; return 1; }
+    if (atomic_load_explicit(&bootargs_arm_valid, memory_order_acquire)) {
+        uint64_t virt = atomic_load_explicit(&bootargs_arm_virt, memory_order_acquire);
+        uint64_t phys = atomic_load_explicit(&bootargs_arm_phys, memory_order_acquire);
+        if (ptr >= virt && ptr - virt < size) {
+            uint64_t pa = phys + (ptr - virt);
+            if (pa >= VMAPPLE_MEM && pa < VMAPPLE_MEM + size) { *off_out = pa - VMAPPLE_MEM; return 1; }
+        }
+    }
+    return 0;
+}
+static int hv_bootargs_interlock_attempt(uint64_t off, const char *via, const char **reason) {
+    uint8_t *ram = board.ram;
+    uint64_t size = board.ram_size;
+    if (!ram) { *reason = "guest RAM not mapped"; return 0; }
+    if (!hv_bootargs_sig_ok(ram, size, off, NULL, NULL, NULL)) { *reason = "candidate fails the boot_args signature"; return 0; }
+    if (!hv_bootargs_patch_core(ram, size, off, via, reason)) {
+        if (*reason && !strcmp(*reason, "token already present")) {
+            atomic_store_explicit(&bootargs_patch_state, 1, memory_order_release);
+            atomic_store_explicit(&bootargs_patch_claimed, 1, memory_order_release);
+            hv_bootargs_disarm_hooks_if_settled();
+            return 1;
+        }
+        return 0;
+    }
+    atomic_store_explicit(&bootargs_patch_state, 1, memory_order_release);
+    atomic_store_explicit(&bootargs_patch_claimed, 1, memory_order_release);
+    hv_bootargs_disarm_hooks_if_settled();
+    return 1;
+}
+static int hv_bootargs_in_kernel_range(HvCpu *cpu, uint64_t pc, uint64_t phys, uint64_t top, uint64_t virt, int range_ok) {
+    if (cpu->sctlr_el1 & 1) return range_ok ? (pc >= virt && pc - virt < top - phys) : (pc == virt);
+    return range_ok ? (pc >= phys && pc < top) : (pc == phys);
+}
+static void hv_bootargs_t1_fetch(HvCpu *cpu, uint64_t prev_pc) {
+    if (cpu->index != 0 || cpu->el != 1) return;
+    int ba_active = getenv("HV_BOOTARGS_APPEND") && !hv_bootargs_patch_settled();
+    int dt_active = hv_dtplant_gate_on() && !hv_dtplant_settled();
+    if (!ba_active && !dt_active) { hv_bootargs_disarm_hooks_if_settled(); return; }
+    if (!atomic_load_explicit(&bootargs_arm_valid, memory_order_acquire)) return;
+    uint64_t phys = atomic_load_explicit(&bootargs_arm_phys, memory_order_acquire);
+    uint64_t top = atomic_load_explicit(&bootargs_arm_top, memory_order_acquire);
+    uint64_t virt = atomic_load_explicit(&bootargs_arm_virt, memory_order_acquire);
+    int range_ok = atomic_load_explicit(&bootargs_arm_range_ok, memory_order_acquire);
+    if (!hv_bootargs_in_kernel_range(cpu, cpu->pc, phys, top, virt, range_ok)) return;
+    if (hv_bootargs_in_kernel_range(cpu, prev_pc, phys, top, virt, range_ok)) return;
+    uint64_t off = 0;
+    int have_off = hv_bootargs_off_from_ptr(cpu->x[0], &off);
+    if (ba_active && !atomic_exchange_explicit(&bootargs_t1_done, 1, memory_order_acq_rel)) {
+        const char *reason = NULL;
+        if (have_off) (void)hv_bootargs_interlock_attempt(off, "T1", &reason);
+    }
+    if (dt_active && !atomic_exchange_explicit(&dtplant_t1_done, 1, memory_order_acq_rel)) {
+        const char *reason = NULL;
+        if (have_off) (void)hv_dtplant_attempt(off, "T1", &reason);
+    }
+}
+static void hv_bootargs_t2_hvc(HvCpu *cpu, uint64_t fn) {
+    (void)fn;
+    if (cpu->index != 0 || cpu->el != 1) return;
+    int ba_active = getenv("HV_BOOTARGS_APPEND") && !hv_bootargs_patch_settled();
+    int dt_active = hv_dtplant_gate_on() && !hv_dtplant_settled();
+    if (!ba_active && !dt_active) { hv_bootargs_disarm_hooks_if_settled(); return; }
+    int have_armed = atomic_load_explicit(&bootargs_arm_valid, memory_order_acquire);
+    uint64_t armed_off = have_armed ? atomic_load_explicit(&bootargs_arm_found, memory_order_acquire) : 0;
+    uint64_t reg_off[31];
+    int nreg = 0, reg_is_armed = 0;
+    for (int i = 1; i <= 30; i++) {
+        uint64_t off;
+        if (!hv_bootargs_off_from_ptr(cpu->x[i], &off)) continue;
+        if (!hv_bootargs_sig_ok(board.ram, board.ram_size, off, NULL, NULL, NULL)) continue;
+        if (have_armed && off == armed_off) reg_is_armed = 1;
+        else reg_off[nreg++] = off;
+    }
+    if (!have_armed && !nreg && !reg_is_armed) return;
+    if (ba_active && !atomic_exchange_explicit(&bootargs_t2_done, 1, memory_order_acq_rel)) {
+        const char *reason = NULL;
+        int ok = 0;
+        if (reg_is_armed && hv_bootargs_interlock_attempt(armed_off, "T2", &reason)) ok = 1;
+        for (int i = 0; i < nreg && !ok; i++)
+            if (hv_bootargs_interlock_attempt(reg_off[i], "T2", &reason)) ok = 1;
+        if (!ok && have_armed && !reg_is_armed) (void)hv_bootargs_interlock_attempt(armed_off, "T2", &reason);
+    }
+    if (dt_active && !atomic_exchange_explicit(&dtplant_t2_done, 1, memory_order_acq_rel)) {
+        const char *reason = NULL;
+        int ok = 0;
+        if (reg_is_armed && hv_dtplant_attempt(armed_off, "T2", &reason)) ok = 1;
+        for (int i = 0; i < nreg && !ok; i++)
+            if (hv_dtplant_attempt(reg_off[i], "T2", &reason)) ok = 1;
+        if (!ok && have_armed && !reg_is_armed) (void)hv_dtplant_attempt(armed_off, "T2", &reason);
+    }
+}
+static void *hv_bootargs_poll_thread(void *unused) {
+    (void)unused;
+    HvBootDisplay d;
+    while (!hv_patches_all_settled() && !atomic_load(&bootargs_poll_stop) && !atomic_load(&input_stopping)) {
+        if (hv_bootargs_now() - bootargs_t0 > 60.0) break; /* resumed snapshots have already booted */
+        hv_bootargs_try_arm();
+        hv_vm_boot_display(&d);
+        if (hv_patches_all_settled()) break;
+        usleep(50000);
+    }
+    hv_bootargs_disarm_hooks_if_settled();
+    return NULL;
+}
+
 /* arm64 boot_args: {u16 Revision, u16 Version, u64 virtBase, physBase, memSize,
    topOfKernelData, Video {baseAddr, display, rowBytes, width, height, depth}, ...}.
    Found by scanning page starts for one whose physBase is the RAM base. */
@@ -102,6 +416,8 @@ int hv_vm_boot_display(HvBootDisplay *d) {
                 if (w < 320 || w > 8192 || hh < 200 || hh > 8192 || row < w * 4 || (depth & 0xff) != 32) continue;
                 if (base < VMAPPLE_MEM || base - VMAPPLE_MEM + row * hh > size) continue;
                 boot_args_offset = off;
+                hv_bootargs_maybe_patch(ram, size, off);
+                hv_dtplant_maybe_plant(ram, size, off);
             }
         }
         if (!boot_args_offset) return -1;
@@ -279,6 +595,7 @@ int hv_vm_create(const HvVmConfig *c, char *err, size_t errlen) {
     int r = c->jit_rx ? hv_machine_init_jit(&m, c->jit_rx, c->jit_rw, jit) : hv_machine_init(&m, jit);
     if (r != 0) return fail(err, errlen, "Cannot set up the JIT region.");
     m.log = c->log;
+    memcpy(m.machine_uuid, c->machine_uuid, sizeof m.machine_uuid);
     m.gen_checks = getenv("HV_JIT_POISON") != NULL;
     if (getenv("HV_SLOW_MEM")) m.slow_mem = 1; /* debugging: every load and store through the helper */
     ncpus = c->ncpus < 1 ? 1 : c->ncpus > HV_MAX_CPUS ? HV_MAX_CPUS : c->ncpus;
@@ -315,6 +632,14 @@ int hv_vm_create(const HvVmConfig *c, char *err, size_t errlen) {
     atomic_store_explicit(&display_pvg, board.pvg, memory_order_release);
     os_unfair_lock_unlock(&display_lock);
     atomic_store(&input_stopping, 0);
+    hv_bootargs_reset_state();
+    if (!c->installer && (getenv("HV_BOOTARGS_APPEND") || hv_dtplant_gate_on())) {
+        bootargs_t0 = hv_bootargs_now();
+        m.bootargs_fetch_hook = hv_bootargs_t1_fetch;
+        m.bootargs_hvc_hook = hv_bootargs_t2_hvc;
+        if (pthread_create(&bootargs_poll_tid, NULL, hv_bootargs_poll_thread, NULL) == 0)
+            bootargs_poll_started = 1;
+    }
     return 0;
 }
 
@@ -324,6 +649,11 @@ void hv_vm_destroy(void) {
         primary_started = 0;
     }
     if (!machine_created) return;
+    if (bootargs_poll_started) {
+        atomic_store(&bootargs_poll_stop, 1);
+        pthread_join(bootargs_poll_tid, NULL);
+        bootargs_poll_started = 0;
+    }
     /* The bridge excludes readers. Unpublish the display before draining
        queued GPU work; completion callbacks still need the GIC and RAM. */
     os_unfair_lock_lock(&display_lock);

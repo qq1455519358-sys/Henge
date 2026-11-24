@@ -131,6 +131,13 @@ void henge_vm_microphone(const float *mono_48000, uint32_t frames);
 void henge_vm_camera_nv12(const uint8_t *y, uint32_t y_stride, const uint8_t *uv,
                           uint32_t uv_stride, uint32_t width, uint32_t height, int mirrored);
 
+/* Per-machine UUID (16 raw bytes) and live CoreBluetooth radio bridge for the USB Bluetooth HCI controller. */
+void henge_vm_set_machine_uuid(const uint8_t *uuid16);
+int henge_vm_bt_scan_active(void);
+int henge_vm_bt_inject_adv(uint8_t addr_type, const uint8_t *addr6, int8_t rssi,
+                           const uint8_t *adv_data, uint32_t adv_len);
+int henge_vm_bt_adv_active(uint8_t *out, uint32_t cap, uint32_t *out_len);
+
 /* The boot framebuffer (Apple logo and progress bar), 32-bit BGRA, or -1 if
    the kernel has not got that far. A successful call returns an owned copy;
    release it with henge_vm_free_display after use. */

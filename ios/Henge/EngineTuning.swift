@@ -28,6 +28,10 @@ enum EngineTuning {
         // The memory balloon, asking for nothing: there for MemoryRelief when iOS runs short (KeepAlive.swift).
         "HV_BALLOON": "0",
         "HV_STATS": "10",      // seconds between engine stats lines in the log; 0 = off
+        // Bluetooth bind: appends bt-transport-override=10 to XNU boot-args in-window so macOS bluetoothd
+        // passes the VM power gate and binds BroadcomBluetoothHostControllerUSBTransport to our BCM20702A0 dongle.
+        "HV_BOOTARGS_APPEND": "bt-transport-override=10",
+        "HV_BT_PERSONALITY": "bcm20702",
     ]
 
     static func apply() {

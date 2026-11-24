@@ -253,6 +253,10 @@ typedef struct HvMachine {
     uint64_t stop_pc;    /* tests: leave the dispatcher when pc reaches this */
     void (*stop_hook)(HvCpu *cpu); /* debugging: call this there instead of leaving */
     uint64_t stop_pc2;   /* debugging: a second such place */
+    /* Boot-args interlock (host/vm.c): NULL unless HV_BOOTARGS_APPEND arms them. */
+    void (*bootargs_fetch_hook)(HvCpu *cpu, uint64_t prev_pc);
+    void (*bootargs_hvc_hook)(HvCpu *cpu, uint64_t fn);
+    uint8_t machine_uuid[16]; /* copied from HvVmConfig by hv_vm_create before devices are built */
     uint32_t jit_gen;    /* full flushes so far, as blocks see them (HV_JIT_POISON checks) */
     int gen_checks;
     int trace;           /* print every block entered */

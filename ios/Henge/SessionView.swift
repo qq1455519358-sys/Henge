@@ -719,6 +719,8 @@ struct SessionView: View {
         } else {
             henge_vm_set_identity(nil, nil, nil)
         }
+        let uuidBytes: [UInt8] = withUnsafeBytes(of: mac.id.uuid) { Array($0) }
+        henge_vm_set_machine_uuid(uuidBytes)
         var rc: Int32 = -1
         if InstantResume.enabled, let at = InstantResume.saved(for: mac, ramMB: ram, cpus: cpus) {
             HengeLog.log("resume", "picking up the Mac saved \(Int(Date().timeIntervalSince(at))) s ago")

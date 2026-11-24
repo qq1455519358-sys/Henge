@@ -40,11 +40,17 @@ _Atomic int henge_tl_ran;
 
 /* What About This Mac reports (DeviceIdentity.swift): the device Henge runs on, as the guest sees it. */
 static char identity_soc[32], identity_name[32], identity_model[32];
+static uint8_t identity_uuid[16];
 
 void henge_vm_set_identity(const char *soc_name, const char *product_name, const char *model_id) {
     snprintf(identity_soc, sizeof identity_soc, "%s", soc_name ? soc_name : "");
     snprintf(identity_name, sizeof identity_name, "%s", product_name ? product_name : "");
     snprintf(identity_model, sizeof identity_model, "%s", model_id ? model_id : "");
+}
+
+void henge_vm_set_machine_uuid(const uint8_t *uuid16) {
+    if (uuid16) memcpy(identity_uuid, uuid16, 16);
+    else memset(identity_uuid, 0, 16);
 }
 
 static void on_exit(int reason) {
@@ -207,6 +213,7 @@ static int boot_or_resume(const char *rom, const char *disk, const char *aux, ui
                     .product_name = identity_name[0] ? identity_name : NULL,
                     .model_id = identity_model[0] ? identity_model : NULL,
                     .jit_rx = jit->rx_addr, .jit_rw = jit->rw_addr, .jit_bytes = jit->size};
+    memcpy(c.machine_uuid, identity_uuid, sizeof c.machine_uuid);
     fprintf(stderr, "henge: booting with %d CPUs, %llu MB RAM, a %zu MB JIT region\n", cpus, (unsigned long long)ram_mb,
             jit->size >> 20);
     if (hv_vm_create(&c, err, errlen) != 0) return failed_start();
@@ -579,6 +586,32 @@ void henge_vm_camera_nv12(const uint8_t *y, uint32_t ys, const uint8_t *uv,
         hv_machine_wake(hv_vm_machine());
     }
     pthread_rwlock_unlock(&api_lock);
+}
+
+int henge_vm_bt_scan_active(void) {
+    if (!lock_running()) return 0;
+    HvVmapple *b = hv_vm_board();
+    int on = b->usb ? hv_xhci_bt_scan_active(b->usb) : 0;
+    pthread_rwlock_unlock(&api_lock);
+    return on;
+}
+
+int henge_vm_bt_inject_adv(uint8_t addr_type, const uint8_t *addr6, int8_t rssi,
+                           const uint8_t *adv_data, uint32_t adv_len) {
+    if (!lock_running()) return 0;
+    HvVmapple *b = hv_vm_board();
+    int ok = (b->usb && addr6) ? hv_xhci_bt_inject_adv(b->usb, addr_type, addr6, rssi, adv_data, adv_len) : 0;
+    pthread_rwlock_unlock(&api_lock);
+    return ok;
+}
+
+int henge_vm_bt_adv_active(uint8_t *out, uint32_t cap, uint32_t *out_len) {
+    if (out_len) *out_len = 0;
+    if (!lock_running()) return 0;
+    HvVmapple *b = hv_vm_board();
+    int ok = b->usb ? hv_xhci_bt_adv_active(b->usb, out, cap, out_len) : 0;
+    pthread_rwlock_unlock(&api_lock);
+    return ok;
 }
 
 #if TARGET_OS_IPHONE

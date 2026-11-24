@@ -3,6 +3,7 @@
 
 #include <pthread.h>
 
+#include "bt_hci.h"
 #include "pcie.h"
 #include "usb_camera.h"
 
@@ -12,16 +13,18 @@
      Port 2 (dev 1): Apple Magic Trackpad 2 multitouch
      Port 3 (dev 2): UVC bulk Front/Back camera
      Port 4 (dev 3): 5-button wheel USB mouse
-     Port 5 (dev 4): Absolute-position USB tablet / Apple Pencil digitizer */
+     Port 5 (dev 4): Absolute-position USB tablet / Apple Pencil digitizer
+     Port 6 (dev 5): Broadcom BCM20702A0 USB Bluetooth HCI controller */
 enum {
     HV_XDEV_KBD = 0,
     HV_XDEV_TP = 1,
     HV_XDEV_CAMERA = 2,
     HV_XDEV_MOUSE = 3,
     HV_XDEV_TABLET = 4,
+    HV_XDEV_BT = 5,
 };
 #define HV_XHCI_SLOTS 12
-#define HV_XHCI_PORTS 5
+#define HV_XHCI_PORTS 6
 #define HV_XHCI_DEVICES 5
 #define HV_XHCI_INTRS 4
 #define HV_XHCI_EPS 32 /* device context index 1..31 */
@@ -116,6 +119,15 @@ typedef struct HvXhci {
     int tab_wheel;               /* accumulated wheel delta awaiting emission */
     int tab_dirty;
     uint64_t tab_delivered;
+    /* The Bluetooth HCI dongle (port 6): its own slot, rings, and lock. */
+    pthread_mutex_t bt_mu;
+    int bt_present;              /* 0 only with HV_NO_BT */
+    int bt_slot;
+    HvXhciRing bep[HV_XHCI_EPS];
+    int bep_running[HV_XHCI_EPS];
+    int bt_configured;
+    uint8_t bt_alt[4];
+    HvBtHci bt;
 } HvXhci;
 
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus);
@@ -147,6 +159,11 @@ int hv_xhci_mouse_ready(const HvXhci *x);
 void hv_xhci_tablet_move(HvXhci *x, uint16_t px, uint16_t py);
 void hv_xhci_tablet_button(HvXhci *x, int button, int down);
 void hv_xhci_tablet_wheel(HvXhci *x, int dy);
+/* Any thread: CoreBluetooth host radio bridge for the USB Bluetooth HCI controller. */
+int hv_xhci_bt_scan_active(HvXhci *x);
+int hv_xhci_bt_inject_adv(HvXhci *x, uint8_t addr_type, const uint8_t addr[6], int8_t rssi,
+                          const uint8_t *adv_data, uint32_t adv_len);
+int hv_xhci_bt_adv_active(HvXhci *x, uint8_t *out, uint32_t cap, uint32_t *out_len);
 /* CPU thread: hand waiting reports to the guest. */
 void hv_xhci_poll(HvXhci *x);
 /* CPU stopped: rebase host deadlines and discard pre-pause camera images. */
