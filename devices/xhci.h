@@ -11,16 +11,18 @@
      Port 1 (dev 0): Apple USB HID boot keyboard
      Port 2 (dev 1): Apple Magic Trackpad 2 multitouch
      Port 3 (dev 2): UVC bulk Front/Back camera
-     Port 4 (dev 3): 5-button wheel USB mouse */
+     Port 4 (dev 3): 5-button wheel USB mouse
+     Port 5 (dev 4): Absolute-position USB tablet / Apple Pencil digitizer */
 enum {
     HV_XDEV_KBD = 0,
     HV_XDEV_TP = 1,
     HV_XDEV_CAMERA = 2,
     HV_XDEV_MOUSE = 3,
+    HV_XDEV_TABLET = 4,
 };
 #define HV_XHCI_SLOTS 12
-#define HV_XHCI_PORTS 4
-#define HV_XHCI_DEVICES 4
+#define HV_XHCI_PORTS 5
+#define HV_XHCI_DEVICES 5
 #define HV_XHCI_INTRS 4
 #define HV_XHCI_EPS 32 /* device context index 1..31 */
 #define HV_XHCI_REPORTS 256
@@ -99,11 +101,21 @@ typedef struct HvXhci {
     uint32_t tp_multi_logs; /* multi-finger deliveries logged, capped */
     uint8_t tp_f1[8];   /* feature report 1: the header for the selected sensor register */
     int tp_f1_len;
-    /* The mouse on port 3: its reports, oldest first, and the buttons held now. */
+    /* The mouse on port 4: its reports, oldest first, and the buttons held now. */
     uint8_t ms_reports[HV_MS_REPORTS][HV_MS_REPORT_LEN];
     uint32_t ms_rhead, ms_rtail;
     uint8_t ms_buttons;
-    int ms_unplugged; /* HV_USB_MOUSE=0: nothing on port 3 */
+    int ms_unplugged; /* HV_USB_MOUSE=0: nothing on port 4 */
+    /* The tablet (port 5): a generated report descriptor and a single
+       latest-state slot. Absolute positions coalesce here, never queue. */
+    uint8_t tab_desc[70];
+    int tab_desc_len;
+    uint16_t tab_xmax, tab_ymax; /* clamp bounds the descriptor was built with */
+    uint8_t tab_buttons;
+    uint16_t tab_x, tab_y;
+    int tab_wheel;               /* accumulated wheel delta awaiting emission */
+    int tab_dirty;
+    uint64_t tab_delivered;
 } HvXhci;
 
 HvXhci *hv_xhci_create(HvMachine *m, HvPcie *bus);
@@ -131,6 +143,10 @@ void hv_xhci_mouse(HvXhci *x, int dx, int dy, int wheel, int pan);
 void hv_xhci_mouse_buttons(HvXhci *x, unsigned buttons);
 /* Whether the guest has configured the mouse and is reading it: until then its input belongs elsewhere. */
 int hv_xhci_mouse_ready(const HvXhci *x);
+/* Any thread: the tablet's latest state (absolute position, button, wheel). */
+void hv_xhci_tablet_move(HvXhci *x, uint16_t px, uint16_t py);
+void hv_xhci_tablet_button(HvXhci *x, int button, int down);
+void hv_xhci_tablet_wheel(HvXhci *x, int dy);
 /* CPU thread: hand waiting reports to the guest. */
 void hv_xhci_poll(HvXhci *x);
 /* CPU stopped: rebase host deadlines and discard pre-pause camera images. */
