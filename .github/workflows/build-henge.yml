@@ -45,6 +45,13 @@ jobs:
         working-directory: Henge
         run: env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET make test-units
 
+      # The camera, microphone and sound devices' suite. Its three microphone-pacing checks fail on hosted runners
+      # (both runs of 2026-11-24); until that is settled on real hardware it reports without stopping the build.
+      - name: Run the media devices' tests (microphone pacing fails on hosted runners)
+        working-directory: Henge
+        continue-on-error: true
+        run: env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET make test-media
+
       # fetch_deps.sh copies prebuilt pieces out of a BUILT Husk checkout:
       # StikJIT.xcframework (vendored in Husk's repo, comes with checkout),
       # libhusk_rppairing.a (scripts/build_rppairing_ios.sh) and the
