@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject private var jit = JITCoordinator.shared
     @AppStorage(JITCoordinator.autoEnableKey) private var jitAtLaunch = false
+    @AppStorage(OpenMacAtLaunch.key) private var openMacAtLaunch = OpenMacAtLaunch.defaultValue
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(HardwareMouse.scrollSpeedKey) private var scrollSpeed = 0.3
@@ -22,7 +23,7 @@ struct SettingsView: View {
     @AppStorage(DeskAppearance.key) private var appearance = DeskAppearance.system
     @AppStorage(InstantResume.key) private var instantResume = false
     @AppStorage(KeepAlive.key) private var keepAlive = true
-    @AppStorage(MacAppsFeature.key) private var macApps = true
+    @AppStorage(MacAppsFeature.key) private var macApps = false
 
     /// The second footer paragraph: how you click, given the selected input mode.
     private var inputDescription: String {
@@ -55,6 +56,9 @@ struct SettingsView: View {
                         Text("Henge connects LocalDevVPN first when it is off, and comes back.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
+                    Toggle("Open the Mac when Henge opens", isOn: $openMacAtLaunch)
+                    Text("Once JIT is on, the Mac you used last starts by itself, so Henge opens into macOS.")
+                        .font(.footnote).foregroundStyle(.secondary)
                     LabeledContent("Code region", value: "\(JITBootstrap.jitBytes >> 20) MB, claimed once per launch")
                 }
                 .listRowBackground(Desk.card)

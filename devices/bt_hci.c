@@ -862,6 +862,21 @@ void hv_bt_command(HvBtHci *bt, const uint8_t *pkt, uint32_t len) {
         uint8_t peer_type = plen >= 6 ? par[5] : 0;
         uint8_t peer[6] = {0, 0, 0, 0, 0, 0};
         if (plen >= 12) memcpy(peer, par + 6, 6);
+        if (!bt->acl_sink) {
+            /* No backend peer is attached (nothing calls hv_bt_set_acl_sink outside this file and its tests), so no
+               data could ever flow on a connection. Answering success here made macOS believe it had connected to a
+               device that is not there. A real controller whose initiation fails reports LE Connection Complete
+               with status 0x3E (Connection Failed to be Established): no handle is allocated, and the scanning it
+               was doing is left as it was (only an established connection takes the radio from it). */
+            uint8_t cp[18];
+            memset(cp, 0, sizeof cp);
+            cp[0] = 0x3e; /* status */
+            cp[4] = peer_type; /* handle (1-2), role (3), timing and accuracy stay 0 */
+            memcpy(cp + 5, peer, 6);
+            le_meta_event(bt, 0x01, cp, sizeof cp);
+            if (btlog()) fprintf(stderr, "bt: le create connection: no backend peer, failed (0x3e)\n");
+            break;
+        }
         uint16_t interval = plen >= 17 ? (uint16_t)(par[15] | par[16] << 8) : 0x0028;
         uint16_t latency = plen >= 19 ? (uint16_t)(par[17] | par[18] << 8) : 0;
         uint16_t supto = plen >= 21 ? (uint16_t)(par[19] | par[20] << 8) : 0x01f4;
@@ -888,6 +903,12 @@ void hv_bt_command(HvBtHci *bt, const uint8_t *pkt, uint32_t len) {
         if (btlog()) fprintf(stderr, "bt: le connection complete handle %04x\n", handle);
         break;
     }
+    case 0x2043: /* LE Extended Create Connection: not claimed (octet 37 bit 0x80 stays clear in Read Local Supported
+                    Commands, above), so a host that sends it anyway gets what a controller answers for a command it
+                    does not support: Command Status 0x01 (Unknown HCI Command). The default below would have answered
+                    a bare successful Command Complete, a shape no initiating command has. */
+        command_status(bt, opcode, 0x01);
+        break;
     case 0x200e: /* LE Create Connection Cancel */
         command_complete(bt, opcode, 0, NULL, 0);
         break;

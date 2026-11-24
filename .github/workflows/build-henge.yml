@@ -38,6 +38,13 @@ jobs:
         with:
           path: Henge
 
+      # The engine's own tests, on Apple silicon, before anything is built for the IPA: they need only Xcode (no
+      # Husk, no Homebrew), so a failure stops the run in minutes. The macOS SDK on purpose: an SDKROOT or iOS
+      # deployment target left in the environment would make clang build these for iOS.
+      - name: Run the engine's unit tests
+        working-directory: Henge
+        run: env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET make test-units
+
       # fetch_deps.sh copies prebuilt pieces out of a BUILT Husk checkout:
       # StikJIT.xcframework (vendored in Husk's repo, comes with checkout),
       # libhusk_rppairing.a (scripts/build_rppairing_ios.sh) and the

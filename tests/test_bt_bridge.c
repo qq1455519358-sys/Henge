@@ -100,8 +100,66 @@ static uint32_t cmd(HvBtHci *bt, uint16_t opcode, const uint8_t *par, uint8_t pl
     return hv_bt_take_event(bt, ev, 256);
 }
 
+/* No backend attached (the shipped state: nothing outside bt_hci.c calls hv_bt_set_acl_sink): a connection attempt
+   must fail as a real controller's does, not report a peer that is not there. Then a sink is attached to the same
+   core and the next attempt connects with the first handle, so the failure consumed none. */
+static void no_backend_scenario(void) {
+    HvBtHci bt;
+    hv_bt_init(&bt);
+    uint8_t ev[256];
+    uint32_t n;
+    printf("scenario: LE create connection with no backend peer attached\n");
+    n = cmd(&bt, 0x0c03, NULL, 0, ev);
+    static const uint8_t scanon[2] = {0x01, 0x00};
+    n = cmd(&bt, 0x200c, scanon, 2, ev);
+    check("no-backend: scanning on before the attempt", bt.le_scan_enabled, 1);
+    uint8_t connpar[25];
+    memset(connpar, 0, sizeof connpar);
+    connpar[0] = 0x10; connpar[2] = 0x10;
+    connpar[5] = kP2.addr_type;
+    memcpy(connpar + 6, kP2.addr, 6);
+    connpar[15] = 0x28;
+    connpar[19] = 0xf4; connpar[20] = 0x01;
+    n = cmd(&bt, 0x200d, connpar, 25, ev);
+    check("no-backend: first event is cmd status", ev[0], 0x0f);
+    check("no-backend: cmd status success (the command was accepted)", ev[2], 0);
+    check("no-backend: cmd status names LE Create Connection", ev[4] | ev[5] << 8, 0x200d);
+    n = hv_bt_take_event(&bt, ev, sizeof ev);
+    check("no-backend: connection complete event len exact", (long)n, 21);
+    check("no-backend: connection complete is LE meta", ev[0], 0x3e);
+    check("no-backend: connection complete subevent", ev[2], 0x01);
+    check("no-backend: status 0x3E Connection Failed to be Established", ev[3], 0x3e);
+    check("no-backend: no handle reported", ev[4] | ev[5] << 8, 0);
+    check("no-backend: peer address type echoed", ev[7], kP2.addr_type);
+    check("no-backend: peer address echoed", memcmp(ev + 8, kP2.addr, 6), 0);
+    check("no-backend: no further event", hv_bt_event_pending(&bt), 0);
+    check("no-backend: no live handle", bt.le_conn_handle, 0);
+    check("no-backend: no handle allocated", bt.le_next_handle, 0x0040);
+    check("no-backend: scanning left as it was", bt.le_scan_enabled, 1);
+
+    n = cmd(&bt, 0x2043, connpar, 25, ev); /* LE Extended Create Connection: not claimed */
+    check("ext create connection: cmd status", ev[0], 0x0f);
+    check("ext create connection: Unknown HCI Command", ev[2], 0x01);
+    check("ext create connection: no further event", hv_bt_event_pending(&bt), 0);
+    check("ext create connection: no live handle", bt.le_conn_handle, 0);
+
+    MockBackend mock;
+    memset(&mock, 0, sizeof mock);
+    mock.bt = &bt;
+    hv_bt_set_acl_sink(&bt, mock_acl_sink, &mock);
+    n = cmd(&bt, 0x200d, connpar, 25, ev);
+    check("sink attached: cmd status success", ev[0] == 0x0f && ev[2] == 0, 1);
+    n = hv_bt_take_event(&bt, ev, sizeof ev);
+    check("sink attached: connection complete status ok", ev[3], 0);
+    check("sink attached: first handle 0x0040", ev[4] | ev[5] << 8, 0x0040);
+    check("sink attached: core tracks it", bt.le_conn_handle, 0x0040);
+    check("sink attached: connecting ends scanning", bt.le_scan_enabled, 0);
+    (void)n;
+}
+
 int main(void) {
     unsetenv("HV_BT_PERSONALITY"); /* exercise the documented default */
+    no_backend_scenario();
     HvBtHci bt;
     hv_bt_init(&bt);
     MockBackend mock;

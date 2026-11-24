@@ -2,10 +2,12 @@ import CoreBluetooth
 import Foundation
 import SwiftUI
 
-/// Bridges the iPad's physical Bluetooth LE radio to the Mac's Broadcom BCM20702A0 USB Bluetooth HCI controller.
-/// When macOS turns on BLE scanning in System Settings › Bluetooth (or any CoreBluetooth Mac app), Henge scans
-/// nearby physical BLE peripherals via CBCentralManager and injects real HCI LE Advertising Reports into the guest.
-/// When macOS advertises BLE services, Henge mirrors the local name and 16-bit/128-bit UUIDs via CBPeripheralManager.
+/// Shows nearby Bluetooth LE devices in macOS, and nothing more. The Mac has an emulated Broadcom BCM20702A0 USB
+/// Bluetooth controller; while macOS scans for BLE devices, Henge scans with CBCentralManager and passes what it
+/// hears to the guest as HCI LE Advertising Reports, so macOS can list the devices. It cannot connect to them:
+/// there is no data path (no connections, no GATT), and classic Bluetooth is absent. When macOS advertises, its
+/// local name and 16-bit service UUIDs are advertised by the iPad through CBPeripheralManager. Off by default:
+/// turning it on makes iPadOS ask for Bluetooth permission the next time a Mac starts.
 final class BluetoothBridge: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralManagerDelegate {
     static let shared = BluetoothBridge()
     static let enabledKey = "henge.bt.radio"
@@ -25,7 +27,7 @@ final class BluetoothBridge: NSObject, ObservableObject, CBCentralManagerDelegat
     private var activeSession = false
 
     var isEnabled: Bool {
-        get { (UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool) ?? true }
+        get { (UserDefaults.standard.object(forKey: Self.enabledKey) as? Bool) ?? false }
         set {
             objectWillChange.send()
             UserDefaults.standard.set(newValue, forKey: Self.enabledKey)
@@ -127,7 +129,7 @@ final class BluetoothBridge: NSObject, ObservableObject, CBCentralManagerDelegat
             } else if scanningNow {
                 self.statusText = count > 0 ? "Scanning · \(count) BLE devices" : "Scanning nearby BLE…"
             } else {
-                self.statusText = count > 0 ? "Ready · \(count) BLE devices cached" : "Ready (macOS Bluetooth attached)"
+                self.statusText = count > 0 ? "Ready · \(count) BLE devices cached" : "Ready (waiting for macOS to scan)"
             }
             self.discoveredCount = count
         }

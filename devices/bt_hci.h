@@ -28,6 +28,9 @@
    backend deliver a discovered peripheral as an LE Advertising Report,
    and hv_bt_set_acl_sink() routes guest ACL data to a backend (the
    CoreBluetooth bridge on device, a mock in tests/test_bt_bridge.c).
+   LE Create Connection succeeds only while such a sink is attached;
+   without one it fails with status 0x3E, as a real controller does
+   when no connection can be established.
 
    The core is transport-pure: the caller feeds HCI command packets (the
    3-byte header + parameters that arrive on the USB control pipe) and ACL

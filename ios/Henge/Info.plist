@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Share nearby Bluetooth LE peripherals and Bluetooth mice with your virtual Mac.</string>
+	<string>Use Bluetooth mice with your virtual Mac, and, if you turn it on, show nearby Bluetooth LE devices in macOS.</string>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>$(PRODUCT_BUNDLE_IDENTIFIER).pairing.*</string>
@@ -26,7 +26,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.5.0</string>
+	<string>0.5.1</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -39,7 +39,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>120</string>
+	<string>121</string>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>stikjit</string>

@@ -93,6 +93,7 @@ struct RootView: View {
             }
         }
         .onChange(of: jit.attachGeneration) { _ in JITBootstrap.prewarm() } // the built-in helper attached
+        .task { await openMacAtLaunch() } // Settings › Open the Mac when Henge opens
         .task { // testing only: HENGE_AUTOPILOT
             await Autopilot.run { mac in
                 // A session still on screen (its Mac stopped) is closed first: the same value again would start nothing.
@@ -101,6 +102,54 @@ struct RootView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { running = mac }
             }
         }
+    }
+
+    /// Once a launch: the Mac used last opens as soon as JIT is on, so Henge opens into macOS. It starts the way the
+    /// Start button and the test harness's "mac" command start one (running = mac, and SessionView boots it, or picks
+    /// up an Instant Resume save). Henge offers no other start at launch, so the two cannot both start a Mac.
+    @MainActor private func openMacAtLaunch() async {
+        guard OpenMacAtLaunch.claim() else { return } // once a launch, in whichever window gets here first
+        guard !Autopilot.enabled else { return } // the harness decides what starts
+        let deadline = Date().addingTimeInterval(60)
+        while !Task.isCancelled {
+            // A Mac open, starting or paused: Start or Resume already did it (and once it is closed, Home stays).
+            if running != nil || [1, 3, 4].contains(henge_vm_state()) { return }
+            if Installer.shared.busy {
+                HengeLog.log("launch", "not opening a Mac: macOS is installing")
+                return
+            }
+            if JITBootstrap.ready && tab == .macs && !jit.showSetup && UIApplication.shared.applicationState == .active {
+                guard let mac = machines.all.max(by: { ($0.lastUsed ?? $0.added) < ($1.lastUsed ?? $1.added) }) else {
+                    HengeLog.log("launch", "not opening a Mac: there is none yet")
+                    return
+                }
+                HengeLog.log("launch", "opening \(mac.name), the Mac used last")
+                running = mac
+                return
+            }
+            if Date() > deadline {
+                HengeLog.log("launch", JITBootstrap.ready ? "not opening a Mac: Henge was elsewhere for a minute"
+                                                          : "not opening a Mac: JIT was not on within a minute")
+                return
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+}
+
+/// Settings › "Open the Mac when Henge opens". On by default on iPad, where Henge should feel like a Mac.
+enum OpenMacAtLaunch {
+    static let key = "henge.openMacAtLaunch"
+    static var defaultValue: Bool { Device.isPad }
+    static var enabled: Bool { (UserDefaults.standard.object(forKey: key) as? Bool) ?? defaultValue }
+
+    @MainActor private static var claimed = false
+
+    /// True the first time in a launch, and only when the setting is on.
+    @MainActor static func claim() -> Bool {
+        guard !claimed else { return false }
+        claimed = true
+        return enabled
     }
 }
 

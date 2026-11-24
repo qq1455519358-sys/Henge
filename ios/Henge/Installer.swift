@@ -223,10 +223,16 @@ final class Installer: NSObject, ObservableObject {
         // The restore needs 2 GB, whatever the Mac is set to use afterwards, and gets at most 4 GB: the restore system
         // caches the ~15 GB it writes, so it fills all the memory it is given, and 10 GB of a 12 GB iPhone's RAM in use
         // (it is outside Henge's footprint, so iOS does not stop it) stalls the whole phone two thirds of the way through.
+        // A Mac app that ran in this launch keeps the address room a Mac's memory needs, and the engine refuses to
+        // start a Mac after one (begin_start in henge-vm.c). Say that here, before the memory is sized: on an iPad Pro
+        // the installer got 1536 MB of its 4096 after "Hello (C)" had run, and was told to free storage.
+        guard henge_tl_used() == 0 else {
+            throw message("A Mac app ran in this launch. Quit Henge (swipe it away) and open it again to install macOS.")
+        }
         var restoring = mac
         restoring.ramMB = min(max(mac.ramMB, 2048), 4096)
         let ram = GuestMemory.prepare(restoring)
-        guard ram >= 2048 else { throw message("Installing needs a few more GB of free storage for the Mac's memory.") }
+        guard ram >= 2048 else { throw message(GuestMemory.shortfall(needed: 2048)) }
         setenv("HV_WRITE_CACHE", "0", 1) // the ~15 GB the restore writes goes straight to storage (host/disk.c); this process runs no other Mac
         let work = mac.directory.appendingPathComponent("restore", isDirectory: true)
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)

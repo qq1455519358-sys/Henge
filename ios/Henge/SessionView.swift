@@ -618,14 +618,16 @@ struct SessionView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Bluetooth & Peripherals") {
-                    Toggle("Live Bluetooth LE radio", isOn: $btBridge.isEnabled)
-                    LabeledContent("Bluetooth HCI", value: btBridge.statusText)
+                    Toggle("Show nearby Bluetooth LE devices in macOS", isOn: $btBridge.isEnabled)
+                    LabeledContent("Bluetooth", value: btBridge.statusText)
+                    Text("Experimental. macOS can see them but cannot connect yet.")
+                        .font(.footnote).foregroundStyle(.secondary)
                     Toggle("Physical gamepad input", isOn: $gamepad.isEnabled)
                     LabeledContent("Gamepad", value: gamepad.controllerName ?? "None connected")
                     LabeledContent("iPad host status", value: hostStatus.batteryPercent >= 0
                                    ? "\(hostStatus.batteryPercent)%\(hostStatus.isCharging ? " ⚡" : "") · \(hostStatus.networkKind)\(hostStatus.ipAddress.isEmpty ? "" : " (\(hostStatus.ipAddress))")"
                                    : hostStatus.networkKind)
-                    Text("Forwards nearby physical Bluetooth LE devices into macOS System Settings › Bluetooth via the Broadcom BCM20702A0 USB HCI controller, maps connected DualSense/Xbox controllers, and streams live iPad battery, charging, thermal, and Wi-Fi status to the macOS menu bar.")
+                    Text("Maps connected DualSense/Xbox controllers, and streams live iPad battery, charging, thermal, and Wi-Fi status to the macOS menu bar.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Camera") {
@@ -734,7 +736,8 @@ struct SessionView: View {
         let ram = GuestMemory.prepare(mac)
         HengeLog.log("session", "available memory \(henge_available_memory() >> 20) MB")
         guard ram >= 1024 else {
-            error = "There is not room for this Mac's memory: it needs a few GB of free storage."
+            // The limit that actually held it back: it used to say "storage" whatever it was.
+            error = GuestMemory.shortfall(needed: 1024)
             return
         }
         var buffer = [CChar](repeating: 0, count: 256)

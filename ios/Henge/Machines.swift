@@ -54,8 +54,13 @@ enum GuestMemory {
         let fits: UInt64 = physical <= 6700 ? 2048 : physical <= 8700 ? 3072 : UInt64.max
         let ram = min(UInt64(mac.ramMB), room, reach > 512 ? reach - 512 : 0, fits) / 512 * 512
         HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach), this device fits \(fits == UInt64.max ? "any" : String(fits)))")
+        last = (room, reach > 512 ? reach - 512 : 0, fits)
         return ram
     }
+
+    /// The three limits the last prepare found, in MB: free storage for the RAM file, the largest free address range
+    /// (less the 512 MB the engine maps beside the RAM), and what this device's memory holds beside Henge and iOS.
+    private(set) static var last: (storage: UInt64, address: UInt64, device: UInt64) = (.max, .max, .max)
 }
 
 /// machine.json in an exported folder (tools/export_ios.sh writes it).
@@ -64,6 +69,29 @@ private struct MachineFile: Codable {
     var ecid: UInt64
     var seed: UInt64?
     var ramMB: Int?
+}
+
+extension GuestMemory {
+    /// What to tell someone when prepare gave less than `needed` MB: the limit that actually held it back. It used to
+    /// be "storage" whatever it was: after "Hello (C)" had run twice, the installer got 1536 MB of the 4096 it asked
+    /// for because the largest free mapping was 2048 MB, and was told to free storage (device log).
+    static func shortfall(needed: UInt64) -> String {
+        // A Mac app that ran in this launch keeps its address room (henge-ios-jit.c), and the engine starts no Mac
+        // after one (begin_start in henge-vm.c): the same words as there.
+        if henge_tl_used() != 0 { return "A Mac app ran in this launch. Quit Henge (swipe it away) and open it again to start a Mac." }
+        let (storage, address, device) = last
+        let limit = min(storage, address, device)
+        if limit == device && device < needed {
+            return "This device's memory holds a Mac of at most \(device) MB beside Henge and iOS; this needs \(needed) MB."
+        }
+        if limit == storage && storage < needed {
+            return "There is free storage for \(storage) MB of the Mac's memory; it needs \(needed) MB. Free some storage, then try again."
+        }
+        if address < needed {
+            return "Henge's address space has room for only \(address) MB of the Mac's memory; it needs \(needed) MB. Quit Henge (swipe it away), open it again, and start the Mac first."
+        }
+        return "There is not room for \(needed) MB of the Mac's memory (storage room \(storage) MB, address room \(address) MB)."
+    }
 }
 
 @MainActor

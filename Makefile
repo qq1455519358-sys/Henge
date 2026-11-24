@@ -134,6 +134,32 @@ $(B)/test_%: tests/test_%.c tests/%_programs.S tests/harness.S tests/harness.h $
 test: all
 	@ulimit -s 65520; for t in $(TESTS); do echo "== $$t"; $$t || exit 1; done # a test keeps a whole HvCpu (2 MB of TLB and more) on its stack
 
+# The Bluetooth controller's own suites. test_bt and test_bt_bridge drive the HCI core alone; the others include
+# devices/xhci.c itself (its statics), so their link leaves xhci.o out.
+$(B)/test_bt: tests/test_bt.c $(B)/bt_hci.o
+	$(CC) $(CFLAGS) $^ -o $@
+$(B)/test_bt_bridge: tests/test_bt_bridge.c $(B)/bt_hci.o
+	$(CC) $(CFLAGS) $^ -o $@
+BT_XHCI_TESTS = $(B)/test_bt_bdaddr $(B)/test_bt_hci21 $(B)/test_bt_hci_extfeat $(B)/test_bt_hci_initseq $(B)/test_bt_hci_postinit
+$(BT_XHCI_TESTS): $(B)/test_bt_%: tests/test_bt_%.c devices/xhci.c devices/*.h $(ENGINE) $(filter-out $(B)/xhci.o,$(DEV))
+	$(CC) $(CFLAGS) $< $(ENGINE) $(filter-out $(B)/xhci.o,$(DEV)) $(METAL_LIBS) -o $@
+# The device-tree plant (host/dtplant.h, header only), on the synthetic ADT in tests/fixtures.
+$(B)/test_dtplant: tests/test_dtplant.c host/dtplant.h | $(B)
+	$(CC) $(CFLAGS) tests/test_dtplant.c -o $@
+
+# Every unit test a plain arm64 Mac with Xcode can build and run: no Homebrew libraries, no tl/ build, no restore
+# stack, nothing from the network (the IPA workflow runs this first). Left out on purpose:
+#   test_vm_lifecycle  links net_slirp.o, which needs Homebrew's libslirp (pkg-config slirp)
+#   test_tl_glue, test_tl_app  need tl/'s own build (its sample programs, and a disk image made with hdiutil)
+#   test_pvg_lifecycle  creates a ParavirtualizedGraphics device, which a hosted runner (itself a VM) is not known to offer
+#   test_bench  a timing run, by hand (tests/bench_programs.S says so)
+#   the Swift tests and tests/test_jit_high_room.py  their own targets and tools
+UNIT_TESTS = $(TESTS) $(B)/test_bt $(B)/test_bt_bridge $(BT_XHCI_TESTS) $(B)/test_dns_lifecycle
+test-units: $(UNIT_TESTS) $(B)/test_dtplant
+	@ulimit -s 65520; for t in $(UNIT_TESTS); do echo "== $$t"; $$t || exit 1; done; \
+	  echo "== $(B)/test_dtplant"; $(B)/test_dtplant tests/fixtures/adt-synthetic.bin
+.PHONY: test-units
+
 $(B):
 	mkdir -p $(B)
 

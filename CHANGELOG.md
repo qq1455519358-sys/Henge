@@ -4,6 +4,38 @@ Henge collects the fixes from the community forks of [Leviidev/Henge](https://gi
 into one build, with a few additions, aimed above all at iPad (tested hardware: iPad Pro M4).
 Every change keeps its original author in the git history.
 
+## 0.5.1 (121)
+
+What 0.5.0 said it did, checked on an iPad Pro M4 (iPadOS 27.0) and made true or said plainly.
+
+### Opens into the Mac
+- **Settings > Open the Mac when Henge opens** (on by default on iPad): once JIT is on, the Mac
+  used last starts by itself, so opening Henge lands in macOS instead of on Henge's home screen.
+  It starts once a launch, never during an install, and never under the test harness.
+
+### What the app tells you is what happened
+- Installing macOS after a Mac app had run in the same launch failed with "Installing needs a few
+  more GB of free storage" on a device with 730 GB free. The real cause is that a Mac app keeps the
+  address room a Mac's memory needs. The installer and the Mac's start now say so ("A Mac app ran
+  in this launch. Quit Henge and open it again"), and a real shortage names what is short:
+  storage, address room, or this device's memory.
+- **Mac apps without macOS** is off by default again: using it blocks starting a Mac until Henge
+  is reopened.
+
+### Bluetooth, honestly
+- The emulated Bluetooth controller answered every LE connection request with "connected", though
+  nothing is behind it, so macOS believed it had connected to devices it could never talk to. A
+  request now fails the way a real controller's does (Connection Failed to be Established) unless
+  a backend is attached.
+- The switch that mirrors nearby Bluetooth LE devices into macOS is off by default and is labelled
+  for what it does: macOS can list those devices, and cannot connect to them. With it off, iPadOS
+  no longer asks for Bluetooth permission when a Mac starts.
+
+### Tested before it is built
+- Every IPA build now first runs the engine's own unit tests on Apple silicon (`make test-units`:
+  the translator, memory, exception and device suites, and the Bluetooth controller's). 0.5.0 was
+  compiled and never run before it reached a device.
+
 ## Unreleased
 
 ### The screen is a Magic Trackpad 2
