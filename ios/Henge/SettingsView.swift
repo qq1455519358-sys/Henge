@@ -17,8 +17,6 @@ struct SettingsView: View {
     @AppStorage(EngineTuning.superblocksKey) private var superblocks = false
     @AppStorage(EngineTuning.groupsKey) private var groups = true
     @AppStorage(EngineTuning.qosUIKey) private var qosUI = EngineTuning.defaultQosUI
-    @AppStorage(EngineTuning.sharedKeepKey) private var sharedKeep = false
-    @AppStorage(EngineTuning.el0WindowKey) private var el0Window = false
     @AppStorage(JITBootstrap.codeCacheKey) private var codeCacheMB = JITBootstrap.defaultCodeCacheMB
     @AppStorage(DeskAppearance.key) private var appearance = DeskAppearance.system
     @AppStorage(InstantResume.key) private var instantResume = false
@@ -124,8 +122,6 @@ struct SettingsView: View {
                     Toggle("Quicker wake from idle", isOn: $wfiSpin)
                     Toggle("Grouped memory accesses", isOn: $groups)
                     Toggle("Superblocks (experimental)", isOn: $superblocks)
-                    Toggle("Keep shared dyld TLB (experimental)", isOn: $sharedKeep)
-                    Toggle("Direct user memory / NCE (experimental)", isOn: $el0Window)
                     Picker("Code cache", selection: $codeCacheMB) {
                         Text("512 MB").tag(512)
                         Text("1 GB").tag(1024)

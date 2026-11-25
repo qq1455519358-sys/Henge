@@ -28,6 +28,12 @@ What 0.5.0 said it did, checked on an iPad Pro M4 (iPadOS 27.0) and made true or
   cannot execute, and JIT failed at every launch ("JIT prewarm FAILED"). The choice is gone, and a saved 2 GB
   becomes 1.5 GB.
 
+### Two experimental switches are out of Settings
+- 0.5.0 added **Keep shared dyld TLB** and **Direct user memory / NCE** to Settings > Performance. Neither had
+  run on a device. With Direct user memory on, an iPad Pro M4 reserved 48 GB of address space for it, the Mac's
+  memory no longer fitted, and the Mac started with 5.6 GB of the 11 GB it asked for; the feature then did not
+  run at all. Both remain available through `Documents/henge-env.txt` for experiments.
+
 ### Bluetooth, honestly
 - The emulated Bluetooth controller answered every LE connection request with "connected", though
   nothing is behind it, so macOS believed it had connected to devices it could never talk to. A

@@ -42,8 +42,13 @@ enum EngineTuning {
         if d.object(forKey: groupsKey) as? Bool == false { env["HV_GROUPS"] = "0" }
         let qosUI = (d.object(forKey: qosUIKey) as? Bool) ?? defaultQosUI
         if qosUI { env["HV_QOS"] = "ui" } else { unsetenv("HV_QOS") }
-        if d.bool(forKey: sharedKeepKey) { env["HV_SHARED_KEEP"] = "1" } else { unsetenv("HV_SHARED_KEEP") }
-        if d.bool(forKey: el0WindowKey) { env["HV_EL0_WINDOW"] = "33" } else { unsetenv("HV_EL0_WINDOW") }
+        // The two switches 0.5.0 put in Settings for these (pull request #157, never run on a device before) are gone,
+        // and what they saved is ignored. With "Direct user memory" on, an iPad Pro M4 reserved 6 CPUs x 8 GB of
+        // address space first, the Mac's memory no longer fitted ("Cannot allocate memory"), the Mac started with
+        // 5632 MB of the 11264 it asked for, and the windows were then not used at all ("no room ... running without
+        // them"). Both stay reachable for experiments through Documents/henge-env.txt (HV_SHARED_KEEP, HV_EL0_WINDOW).
+        unsetenv("HV_SHARED_KEEP")
+        unsetenv("HV_EL0_WINDOW")
         if d.bool(forKey: wfiSpinKey) { env["HV_WFI_SPIN"] = "50" }
         if d.object(forKey: fastFlushKey) as? Bool == false { env["HV_FLUSH"] = "0" }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]

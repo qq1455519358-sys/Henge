@@ -38,11 +38,11 @@ The Mac's xHCI 1.0 root hub has seven ports (`HV_XHCI_SLOTS=12`). What each one 
 | Setting | Where | Recommended Value | Why |
 |---|---|---|---|
 | **macOS Version** | Install | **Sequoia 15.6.1** | Fastest desktop & Safari; avoid macOS 27's heavy shader/daemon overhead |
-| **CPUs** | Home / Mac settings | **3** (default on 4-P-core M4) | Leaves 1 dedicated M4 P-core for Metal GPU replay & UIKit so vCPUs never spill onto E-cores |
+| **CPUs** | Home / Mac settings | **3 or 4** on a 4-P-core M4 | Measured on a 1 TB M4 during boot and login: 6 CPUs did no more work per second than 4, and waited on each other more |
 | **Memory** | Install / Mac settings | **10 GB** by default on a 16 GB iPad (**3 GB** on 8 GB); try **8 GB** | Measured on a 1 TB M4 (15.4 GB): with a 10 GB Mac iPadOS compressed 6–7.7 GB of Henge's memory during first boot, and 6.6–8.8 GB with 12 GB |
 | **Code cache** | Settings › Performance | **1.5 GB** (the default on a 16 GB iPad, and the most there is) | The engine keeps a 1.5 GB hole where translated code may run. 0.5.0 offered 2 GB without enlarging it: on a 1 TB M4 the region landed where code cannot execute and JIT failed at every launch (device log: "claiming 2048 MiB", "MAP_JIT cannot execute here"). 0.5.1 removes the choice |
 | **High-priority vCPUs** | Settings › Performance | **On** (`HV_QOS=ui`) | Prevents XNU battery coalition demotion to efficiency cores |
 | **Grouped memory accesses** | Settings › Performance | **On** (`HV_GROUPS=1`) | +11% sustained FPS on iPad |
 | **Screen** | Mac settings | **Performance** (`1600×1200`) or **Fit** (`1920×1440`) at **60 Hz** | Keeps emulated GPU load low while filling the 4:3 iPad screen |
 | **Lighter macOS** | Session › Details | **On** | Disables background indexing and motion overhead inside macOS |
-| **Keep shared dyld TLB / Direct user memory (NCE)** | Settings › Performance | **Try On** after Setup Assistant completes | Experimental hardware-MMU / shared-cache acceleration (`PR #157`) |
+| **Keep shared dyld TLB / Direct user memory (NCE)** | `Documents/henge-env.txt` only | **Off** | Experimental (`PR #157`). 0.5.0 offered them as switches; with Direct user memory on, a 1 TB M4 gave the Mac 5,632 MB of the 11,264 it asked for and then ran without the feature. 0.5.1 removes the switches |
