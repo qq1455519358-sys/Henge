@@ -70,14 +70,18 @@ enum JITBootstrap {
     /// device has more than 8 GB.
     static let defaultCodeCacheMB: Int = {
         let limit = Entitlements.memoryLimitAtLaunch, physical = ProcessInfo.processInfo.physicalMemory
-        if limit >= 6_500 << 20 && physical > 14 << 30 { return 2048 }
         if limit >= 5_500 << 20 { return physical > 9 << 30 ? 1536 : 1024 }
         return limit >= 3_500 << 20 ? 1024 : 512
     }()
     static let jitBytes: Int = {
-        switch (UserDefaults.standard.object(forKey: codeCacheKey) as? Int) ?? defaultCodeCacheMB {
-        case 2048: return 2048 << 20
-        case 1536: return 1536 << 20
+        // 1.5 GB is the most there is: the engine keeps a hole that size where translated code may run
+        // (HENGE_JIT_HOLD_BYTES in henge-ios-jit.c). 0.5.0 offered 2 GB without enlarging it; on an iPad Pro M4 the
+        // region then landed at 0x7a00000000, where code cannot execute ("TXM device: MAP_JIT cannot execute here"),
+        // and JIT failed at every launch. A 2 GB choice saved by 0.5.0 becomes 1.5 GB here, and is rewritten.
+        let stored = UserDefaults.standard.object(forKey: codeCacheKey) as? Int
+        if stored == 2048 { UserDefaults.standard.set(1536, forKey: codeCacheKey) }
+        switch stored ?? defaultCodeCacheMB {
+        case 2048, 1536: return 1536 << 20
         case 512: return 512 << 20
         default: return 1024 << 20
         }

@@ -40,7 +40,7 @@ The Mac's xHCI 1.0 root hub has seven ports (`HV_XHCI_SLOTS=12`). What each one 
 | **macOS Version** | Install | **Sequoia 15.6.1** | Fastest desktop & Safari; avoid macOS 27's heavy shader/daemon overhead |
 | **CPUs** | Home / Mac settings | **3** (default on 4-P-core M4) | Leaves 1 dedicated M4 P-core for Metal GPU replay & UIKit so vCPUs never spill onto E-cores |
 | **Memory** | Install / Mac settings | **10 GB** by default on a 16 GB iPad (**3 GB** on 8 GB); try **8 GB** | Measured on a 1 TB M4 (15.4 GB): with a 10 GB Mac iPadOS compressed 6–7.7 GB of Henge's memory during first boot, and 6.6–8.8 GB with 12 GB |
-| **Code cache** | Settings › Performance | **1.5 GB** is what a 16 GB iPad gets by default; **2 GB** can be chosen | The 2 GB default needs an app memory limit of 6,500 MB; this iPad reports 6,140 MB (device log: "claiming 1536 MiB") |
+| **Code cache** | Settings › Performance | **1.5 GB** (the default on a 16 GB iPad, and the most there is) | The engine keeps a 1.5 GB hole where translated code may run. 0.5.0 offered 2 GB without enlarging it: on a 1 TB M4 the region landed where code cannot execute and JIT failed at every launch (device log: "claiming 2048 MiB", "MAP_JIT cannot execute here"). 0.5.1 removes the choice |
 | **High-priority vCPUs** | Settings › Performance | **On** (`HV_QOS=ui`) | Prevents XNU battery coalition demotion to efficiency cores |
 | **Grouped memory accesses** | Settings › Performance | **On** (`HV_GROUPS=1`) | +11% sustained FPS on iPad |
 | **Screen** | Mac settings | **Performance** (`1600×1200`) or **Fit** (`1920×1440`) at **60 Hz** | Keeps emulated GPU load low while filling the 4:3 iPad screen |

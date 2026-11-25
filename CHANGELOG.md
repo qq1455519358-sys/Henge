@@ -22,6 +22,12 @@ What 0.5.0 said it did, checked on an iPad Pro M4 (iPadOS 27.0) and made true or
 - **Mac apps without macOS** is off by default again: using it blocks starting a Mac until Henge
   is reopened.
 
+### JIT turns on whatever the code cache setting was
+- 0.5.0 added a 2 GB choice to **Settings > Performance > Code cache** without enlarging the 1.5 GB hole the
+  engine keeps where translated code may run. With 2 GB chosen on an iPad Pro M4 the region landed where code
+  cannot execute, and JIT failed at every launch ("JIT prewarm FAILED"). The choice is gone, and a saved 2 GB
+  becomes 1.5 GB.
+
 ### Bluetooth, honestly
 - The emulated Bluetooth controller answered every LE connection request with "connected", though
   nothing is behind it, so macOS believed it had connected to devices it could never talk to. A
